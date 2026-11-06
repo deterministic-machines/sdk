@@ -1,0 +1,33 @@
+# Publishes the Python SDK to PyPI as `dvm-run`, for a tag `python-v<version>`
+# whose version is the package's (`__version__` in python/src/dvm/__init__.py).
+# PyPI trusts this workflow, in the `pypi` environment, as the project's
+# publisher, so no token is kept anywhere.
+name: publish-python
+
+on:
+  push:
+    tags: ["python-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build
+        working-directory: python
+        run: pip install build && python -m build
+      - name: The tag is the package's version
+        working-directory: python
+        run: test -f "dist/dvm_run-${GITHUB_REF_NAME#python-v}.tar.gz"
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist/
