@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator, Mapping, Optional
 
 import httpx
 
+from dvm.credentials import saved_key
 from dvm.errors import (
     ApiError,
     AuthenticationError,
@@ -33,8 +34,9 @@ _REFUSALS: Mapping[int, type[ApiError]] = {
 
 
 class Connection:
-    """dvm.run's API, as the user whose key it bears: ``api_key``, else
-    ``DVM_API_KEY``; at ``api_url``, else ``DVM_API_URL``, else dvm.run's."""
+    """dvm.run's API, at ``api_url``, else ``DVM_API_URL``, else dvm.run's;
+    as the user whose key it bears: ``api_key``, else ``DVM_API_KEY``, else
+    the one ``dvm-run login`` saved for that dvm.run."""
 
     def __init__(
         self,
@@ -43,12 +45,14 @@ class Connection:
         *,
         transport: Optional[httpx.AsyncBaseTransport] = None,
     ) -> None:
-        key = api_key or os.environ.get("DVM_API_KEY")
+        url = (api_url or os.environ.get("DVM_API_URL") or DEFAULT_API_URL).rstrip("/")
+        key = api_key or os.environ.get("DVM_API_KEY") or saved_key(url)
         if not key:
-            raise DvmError("no API key: pass api_key=, or set DVM_API_KEY")
-        url = api_url or os.environ.get("DVM_API_URL") or DEFAULT_API_URL
+            raise DvmError(
+                f"no API key for {url}: run `dvm-run login`, pass api_key=, or set DVM_API_KEY"
+            )
         self._client = httpx.AsyncClient(
-            base_url=url.rstrip("/") + "/api",
+            base_url=url + "/api",
             headers={"Authorization": f"Bearer {key}"},
             timeout=httpx.Timeout(30.0, read=_READ_TIMEOUT_SECONDS),
             transport=transport,
@@ -85,7 +89,7 @@ class Connection:
         async with self._client.stream("GET", path, params=params) as response:
             if response.is_error:
                 await response.aread()
-                raise _refusal(response)
+                raise refusal_of(response)
             data: list[str] = []
             async for line in response.aiter_lines():
                 if line.startswith("data:"):
@@ -100,11 +104,11 @@ class Connection:
     async def _send(self, method: str, path: str, **request: Any) -> httpx.Response:
         response = await self._client.request(method, path, **request)
         if response.is_error:
-            raise _refusal(response)
+            raise refusal_of(response)
         return response
 
 
-def _refusal(response: httpx.Response) -> ApiError:
+def refusal_of(response: httpx.Response) -> ApiError:
     """The error a refusal is: its status's, with the controller's reason."""
     try:
         message = response.json()["message"]
