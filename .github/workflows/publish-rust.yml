@@ -1,0 +1,37 @@
+# Publishes the Rust SDK to crates.io, `dvm-api` and then `dvm-run`, for a
+# tag `rust-v<version>` whose version is both crates'. crates.io trusts this
+# workflow, in the `crates-io` environment, as their publisher, so no token
+# is kept anywhere.
+name: publish-rust
+
+on:
+  push:
+    tags: ["rust-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      id-token: write
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: The tag is both crates' version
+        run: |
+          for crate in dvm-api dvm-run; do
+            grep -qx "version = \"${GITHUB_REF_NAME#rust-v}\"" "$crate/Cargo.toml"
+          done
+      - run: cargo test --locked --all-features
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      # dvm-api first: dvm-run depends on it.
+      - run: cargo publish --locked --workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

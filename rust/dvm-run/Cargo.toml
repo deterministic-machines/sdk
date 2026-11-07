@@ -1,0 +1,24 @@
+[package]
+name = "dvm-run"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Sandboxes whose every run replays: dvm.run's Rust SDK"
+license = "Apache-2.0"
+repository = "https://github.com/deterministic-machines/sdk"
+homepage = "https://dvm.run"
+keywords = ["sandbox", "replay", "deterministic", "agents"]
+
+[dependencies]
+dvm-api = { path = "../dvm-api", version = "0.1.0" }
+gethostname = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "time"] }
+
+[dev-dependencies]
+axum = "0.8"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "sync"] }

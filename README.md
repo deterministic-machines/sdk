@@ -9,18 +9,21 @@ the same, once it ends.
 | --- | --- | --- |
 | Python | [`python/`](python) | [`dvm-run`](https://pypi.org/project/dvm-run/) |
 | JavaScript, TypeScript | [`js/`](js) | [`dvm-run`](https://www.npmjs.com/package/dvm-run) |
-| Rust | `rust/`, to come | |
+| Rust | [`rust/`](rust) | [`dvm-run`](https://crates.io/crates/dvm-run), over [`dvm-api`](https://crates.io/crates/dvm-api) |
 
 They call the same API and change together, so they live here together.
-Each is released on its own tag: `python-v0.1.0`, `js-v0.1.0`.
+Each is released on its own tag: `python-v0.1.0`, `js-v0.1.0`,
+`rust-v0.1.0`. The Rust crates hold the API's types (`dvm-api`), which
+dvm.run's controller is built over.
 
 ## Developing
 
 `nix develop` gives the tools. A directory's tests that need no platform
-run anywhere (`cd python && pytest`, `cd js && npm ci && npm test`).
-Those that need one run against dvm.run, or a controller and a runner of
-your own, given `DVM_API_URL` and `DVM_API_KEY`; dvm-platform's tests run
-them against its own.
+run anywhere (`cd python && pytest`, `cd js && npm ci && npm test`,
+`cd rust && cargo test`). Those that need one run against dvm.run, or a
+controller and a runner of your own, given `DVM_API_URL` and
+`DVM_API_KEY` (Rust's with `cargo test -- --ignored`); dvm-platform's
+tests run them against its own.
 
 ## License
 

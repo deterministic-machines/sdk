@@ -1,0 +1,5 @@
+# The TypeScript `cargo test --features typescript` writes (ts-rs), as
+# dvm-platform writes the panel's: 64-bit integers as numbers.
+[env]
+TS_RS_EXPORT_DIR = { value = "target/typescript", relative = true }
+TS_RS_LARGE_INT = "number"
