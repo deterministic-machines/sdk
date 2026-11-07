@@ -1,0 +1,33 @@
+# The JS SDK's tests that need no platform, on each Node it takes, and the
+# package it builds. Those that need one, dvm-platform's tests run against
+# its own.
+name: js
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ["22", "24"]
+    defaults:
+      run:
+        working-directory: js
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - name: The built CLI runs
+        run: node dist/cli.js --help

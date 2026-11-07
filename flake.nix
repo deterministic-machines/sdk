@@ -22,6 +22,8 @@
               packages.pytest
               packages.build
             ]))
+            # The JS SDK's tests run its TypeScript as it is, and its build.
+            pkgs.nodejs_24
           ];
         };
       }

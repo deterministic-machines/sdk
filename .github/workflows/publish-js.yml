@@ -1,0 +1,36 @@
+# Publishes the JS SDK to npm as `dvm-run`, for a tag `js-v<version>` whose
+# version is the package's (js/package.json). npm trusts this workflow, in
+# the `npm` environment, as the package's publisher, so no token is kept
+# anywhere.
+name: publish-js
+
+on:
+  push:
+    tags: ["js-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write
+    defaults:
+      run:
+        working-directory: js
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - name: The tag is the package's version
+        run: test "$(node -p 'require("./package.json").version')" = "${GITHUB_REF_NAME#js-v}"
+      - run: npm ci
+      - run: npm test
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install --global npm@11
+      # Builds dist/ first (prepack).
+      - run: npm publish

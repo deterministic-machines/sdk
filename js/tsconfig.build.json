@@ -1,0 +1,11 @@
+{
+  // What npm gets: dist/, its JavaScript and its .d.ts.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"]
+}
