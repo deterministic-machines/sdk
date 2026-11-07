@@ -24,6 +24,11 @@
             ]))
             # The JS SDK's tests run its TypeScript as it is, and its build.
             pkgs.nodejs_24
+            # The Rust SDK's.
+            pkgs.cargo
+            pkgs.rustc
+            pkgs.clippy
+            pkgs.rustfmt
           ];
         };
       }

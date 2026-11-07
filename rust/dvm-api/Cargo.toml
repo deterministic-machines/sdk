@@ -1,0 +1,23 @@
+[package]
+name = "dvm-api"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "dvm.run's REST API: what it takes and returns, checked"
+license = "Apache-2.0"
+repository = "https://github.com/deterministic-machines/sdk"
+homepage = "https://dvm.run"
+
+[features]
+# The types' TypeScript, by ts-rs: dvm.run's panel is written over it.
+typescript = ["dep:ts-rs"]
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+shlex = "1.3"
+thiserror = "2"
+ts-rs = { version = "12", features = ["no-serde-warnings"], optional = true }
+
+[dev-dependencies]
+serde_json = "1"
