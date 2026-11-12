@@ -1,4 +1,4 @@
-/** What the SDK throws. A command's exit code is never one of these. */
+/** What the SDK throws. A program's exit code is never one of these. */
 
 import type { RunState } from "./run-state.ts";
 
@@ -28,7 +28,7 @@ export class InvalidRequestError extends ApiError {}
 /** 401: the API key was revoked, or isn't one. */
 export class AuthenticationError extends ApiError {}
 
-/** 404: no such sandbox, command, execution or replay, or not the key's user's. */
+/** 404: no such sandbox, execution or replay, or not the key's user's. */
 export class NotFoundError extends ApiError {}
 
 /** 409: what was asked can't be done in the state it's in. */
@@ -54,19 +54,6 @@ export class SandboxFailedError extends SandboxEndedError {
   constructor(sandboxId: number, state: RunState) {
     super(sandboxId, state, `sandbox ${sandboxId} failed: ${state.reason}`);
     this.reason = state.reason ?? "";
-  }
-}
-
-/** The sandbox didn't take the command, and why: a script in an image with
- * no shell, a command too long. */
-export class CommandRefusedError extends DvmError {
-  readonly number: number;
-  readonly reason: string;
-
-  constructor(number: number, reason: string) {
-    super(`command ${number} was refused: ${reason}`);
-    this.number = number;
-    this.reason = reason;
   }
 }
 

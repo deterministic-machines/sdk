@@ -1,5 +1,5 @@
 /** The connection to dvm.run's API: its address, the key every request
- * bears, what a refusal means, and server-sent events. */
+ * bears, and what a refusal means. */
 
 import {
   ApiError,
@@ -79,61 +79,13 @@ export class Connection {
     return (text ? JSON.parse(text) : null) as T;
   }
 
-  /** The answer's body, as it is. */
-  async bytes(
-    method: string,
-    path: string,
-    request: Request & { content?: Uint8Array } = {},
-  ): Promise<Uint8Array> {
-    const response = await this.#send(method, path, request, request.content);
-    return new Uint8Array(await this.#read(() => response.arrayBuffer(), request.signal));
-  }
-
-  /** Each server-sent event's data, as JSON, until the stream ends. A
-   * stream that goes quiet for longer than the controller lets one is
-   * dropped, as `NetworkError`. */
-  async *events(path: string, request: Request = {}): AsyncGenerator<unknown> {
-    const quiet = new AbortController();
-    const dropQuiet = () => quiet.abort(new NetworkError(`${path}'s stream went quiet`));
-    let timer = setTimeout(dropQuiet, QUIET_LIMIT_MS);
-    const signal = request.signal ? AbortSignal.any([request.signal, quiet.signal]) : quiet.signal;
-    let reader: ReadableStreamDefaultReader<string> | undefined;
-    try {
-      const response = await this.#send("GET", path, request, undefined, signal);
-      reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
-      let pending = "";
-      let data: string[] = [];
-      for (;;) {
-        const read = await this.#read(() => reader!.read(), request.signal);
-        if (read.done) return;
-        clearTimeout(timer);
-        timer = setTimeout(dropQuiet, QUIET_LIMIT_MS);
-        pending += read.value;
-        let end: number;
-        while ((end = pending.indexOf("\n")) >= 0) {
-          const line = pending.slice(0, end).replace(/\r$/, "");
-          pending = pending.slice(end + 1);
-          if (line.startsWith("data:")) {
-            data.push(line.slice(5).replace(/^ /, ""));
-          } else if (line === "" && data.length > 0) {
-            yield JSON.parse(data.join("\n"));
-            data = [];
-          }
-        }
-      }
-    } finally {
-      clearTimeout(timer);
-      await reader?.cancel().catch(() => undefined);
-    }
-  }
-
   /** The response, refused unless it's a success; `signal` is the call's,
    * and what else may end it. */
   async #send(
     method: string,
     path: string,
     request: Request,
-    body?: string | Uint8Array,
+    body?: string,
     signal = request.signal,
   ): Promise<Response> {
     const url = new URL(this.#api + path);

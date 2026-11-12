@@ -14,44 +14,37 @@ wherever you like. Where no one is there to approve one, such as CI, make a
 key on [dvm.run's API keys page](https://sandbox.dvm.run/keys) and set
 `DVM_API_KEY`.
 
-A sandbox is a VM made from an image: your agent sends it commands and
-files until it stops it. Everything it ran is its execution, which
-replays, the same, once it ends.
+A sandbox is one recorded run of one program: the image's own command, or
+the command and entrypoint you give as you make it. It ends when the program
+exits. Its execution replays, the same, once the program exited.
 
 ```ts
 import { Sandbox, Execution } from "dvm-run";
 
-let id: number;
-{
-  await using sbx = await Sandbox.create("python:3.12", { seed: 7 });
-  id = sbx.id;
-  await sbx.files.write("/app/main.py", "print(1 + 1)\n");
-  const r = await sbx.commands.run("python main.py", { cwd: "/app", timeoutMs: 60_000 });
-  console.log(r.stdout, r.exitCode);
-
-  const server = await sbx.commands.run(["python", "-m", "http.server"], { background: true });
-  await server.kill();
-  await server.wait();
-}
-
-const verdict = await (await (await Execution.get(id)).replay()).wait();
-console.assert(verdict.same);
+await using sandbox = await Sandbox.create("python:3.12", {
+  command: ["python", "-c", "print(1 + 1)"], seed: 7,
+});
+console.log(await sandbox.wait());
+console.log(new TextDecoder().decode((await sandbox.output()).stdout));
+const replay = await (await Execution.get(sandbox.id)).replay();
+console.assert((await replay.wait()).same);
+console.log(new TextDecoder().decode((await replay.output()).stdout));
 ```
 
-It takes dvm.run's address as `apiUrl`, else `DVM_API_URL`, and its key
-as `apiKey`, else `DVM_API_KEY`, else the one `dvm-run login` saved for
-that address.
-
-- A string runs in the sandbox's shell (`/bin/bash -lc`, or `/bin/sh -c`
-  in an image without bash); an array runs as it is.
-- A command's exit code is never an exception. A sandbox that ended throws
-  `SandboxEndedError` (`SandboxFailedError`, with dvm's reason, if it
-  failed) on the next call.
-- `timeoutMs` kills the command once it passes; its result says so, with
-  code 137 and signal 9.
-- Every call takes `signal`, an `AbortSignal`. A command it aborts is
-  killed, unless it runs in the background: there, it stops only the
-  wait.
-- `await using` stops the sandbox at the scope's end, once its log is in,
-  as `stop()` does. Node 22 has no `await using`: call `stop()`, or let
-  TypeScript compile it.
+- Making a sandbox returns once its program started; one that already
+  exited is fine.
+- The program's exit code is never an error. `wait()` throws `SandboxEndedError` for a sandbox that
+  was stopped, and `SandboxFailedError`, with dvm's reason, for one that
+  failed.
+- Output is bytes. In dvm a program's stdout and stderr are one stream, in
+  the order it wrote them: `stdout`. `stderr` is what dvm itself said.
+- `pause`, `resume` and `stop` act on a sandbox that is going. A stopped
+  sandbox's log is cut short, and doesn't replay.
+- A replay's verdict is `same`, `other_exit` (both codes) or `other_output`
+  (the stream, and the first byte that differs).
+- `await using` stops a sandbox still going at the scope's end; without
+  it, call `stop()` in a `finally`. A wait takes an `AbortSignal`, which
+  leaves the program running.
+- It takes dvm.run's address from `DVM_API_URL`, and its key from
+  `DVM_API_KEY`, else the one `dvm-run login` saved for that address; both
+  may be given in code instead.

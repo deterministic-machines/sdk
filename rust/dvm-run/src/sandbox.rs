@@ -1,21 +1,11 @@
-//! A sandbox: a VM made from an image, which takes commands and files until
-//! it's stopped. Everything it ran is its execution, under its id.
-
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
-use std::time::Duration;
 
-use dvm_api::{EnvironmentVariable, Run, RunState, SandboxDraft, SandboxId};
+use dvm_api::{EnvironmentVariable, Run, RunOutput, RunState, SandboxDraft, SandboxId};
 use reqwest::Method;
-use tokio::time::Instant;
 
 use crate::client::Client;
-use crate::commands::Commands;
 use crate::error::{Error, Result};
-use crate::files::Files;
-
-/// A stopped sandbox's runner reports its log within this, or went away.
-const LOG_WAIT: Duration = Duration::from_secs(60);
 
 /// A sandbox, from [`Client::create_sandbox`] or [`Client::connect_sandbox`].
 /// It runs until [`Sandbox::stop`]: dropping it doesn't stop it.
@@ -34,7 +24,7 @@ pub struct SandboxBuilder {
     draft: SandboxDraft,
 }
 
-/// A sandbox's calls, which its commands and files make too: its client,
+/// A sandbox's calls: its client,
 /// its path, and what a refusal means once it ended.
 #[derive(Clone, Debug)]
 pub(crate) struct SandboxCalls {
@@ -50,6 +40,16 @@ impl SandboxBuilder {
             ..SandboxDraft::default()
         };
         Self { client, draft }
+    }
+
+    pub fn command(mut self, command: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.draft.command = command.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn entrypoint(mut self, entrypoint: impl Into<String>) -> Self {
+        self.draft.entrypoint = Some(entrypoint.into());
+        self
     }
 
     pub fn cpus(mut self, cpus: u32) -> Self {
@@ -126,15 +126,7 @@ impl Sandbox {
         &self.name
     }
 
-    pub fn commands(&self) -> Commands {
-        Commands::new(self.calls.clone())
-    }
-
-    pub fn files(&self) -> Files {
-        Files::new(self.calls.clone())
-    }
-
-    /// Where it is: queued, running, paused, stopped, failed.
+    /// Where it is: queued, running, paused, exited, stopped, failed.
     pub async fn state(&self) -> Result<RunState> {
         self.calls.state().await
     }
@@ -147,28 +139,58 @@ impl Sandbox {
         self.act("resume").await
     }
 
-    /// Stops it, which ends its execution, and returns once its log is in,
-    /// so that the execution replays. A sandbox that already ended stays as
-    /// it is.
+    /// Stops an active run. Its cut recording cannot replay.
     pub async fn stop(&self) -> Result<()> {
         let calls = &self.calls;
         let stop = format!("{}/stop", calls.path);
-        let run = match calls
+        match calls
             .client
-            .json(Method::POST, &stop, &[], None::<&()>)
+            .json::<Run>(Method::POST, &stop, &[], None::<&()>)
             .await
         {
-            Ok(run) => run,
+            Ok(_) => {}
             Err(refused @ Error::Conflict { .. }) => {
                 let run = calls.sandbox().await?.run;
                 if run.state.is_active() {
                     return Err(refused);
                 }
-                run
             }
             Err(error) => return Err(error),
         };
-        calls.wait_for_log(run).await
+        Ok(())
+    }
+
+    /// The program's exit code; stopped and failed runs return their error.
+    pub async fn wait(&self) -> Result<i32> {
+        let calls = &self.calls;
+        let mut run = calls.sandbox().await?.run;
+        loop {
+            match run.state {
+                RunState::Exited { code } => return Ok(code),
+                state if !state.is_active() => return Err(Error::ended(self.id(), state)),
+                _ => run = calls.newer_than(&run).await?,
+            }
+        }
+    }
+
+    /// The program's stdout and stderr so far, as bytes.
+    pub async fn output(&self) -> Result<RunOutput> {
+        let path = format!("/executions/{}/output", self.id());
+        self.calls
+            .client
+            .json(Method::GET, &path, &[], None::<&()>)
+            .await
+    }
+
+    /// Runs a scope, stopping this sandbox when it returns or is cancelled.
+    pub async fn scope<T>(&self, operation: impl AsyncFnOnce(&Self) -> Result<T>) -> Result<T> {
+        let mut stop_on_drop = StopOnDrop(Some(self.calls.clone()));
+        let result = operation(self).await;
+        let stopped = self.stop().await;
+        stop_on_drop.0 = None;
+        let value = result?;
+        stopped?;
+        Ok(value)
     }
 
     async fn act(&self, action: &str) -> Result<()> {
@@ -216,25 +238,11 @@ impl SandboxCalls {
     async fn wait_until_running(&self, mut run: Run) -> Result<()> {
         loop {
             match run.state {
-                RunState::Running => return Ok(()),
+                RunState::Running | RunState::Paused | RunState::Exited { .. } => return Ok(()),
                 state if !state.is_active() => return Err(Error::ended(self.id, state)),
                 _ => run = self.newer_than(&run).await?,
             }
         }
-    }
-
-    /// A stopped sandbox's runner ends dvm, then reports its log's size as
-    /// the run's next version; one that never reached a runner has none.
-    async fn wait_for_log(&self, mut run: Run) -> Result<()> {
-        let deadline = Instant::now() + LOG_WAIT;
-        while run.state == RunState::Stopped
-            && run.runner.is_some()
-            && run.log_bytes.is_none()
-            && Instant::now() < deadline
-        {
-            run = self.newer_than(&run).await?;
-        }
-        Ok(())
     }
 
     async fn newer_than(&self, run: &Run) -> Result<Run> {

@@ -1,24 +1,16 @@
-"""A sandbox: a live VM made from an image, which takes commands and files
-until it's stopped, or it fails. Everything it runs is its execution,
-which replays once it ends."""
+"""A sandbox: one recorded run of one program, the image's own or the one
+given as it's made. Its execution replays once the program exited."""
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Awaitable, Mapping, Optional, TypeVar
 
-from dvm.commands import AsyncCommands
 from dvm.connection import Connection
 from dvm.errors import ConflictError, SandboxEndedError, SandboxFailedError
-from dvm.files import AsyncFiles
+from dvm.execution import Output
 from dvm.run_state import RunState
 
 T = TypeVar("T")
-
-# How long a stop waits for its sandbox's log, which the runner reports once
-# dvm has ended; a runner that went away meanwhile never does.
-_LOG_WAIT_SECONDS = 60.0
-
 
 class AsyncSandbox:
     """A sandbox, from ``await AsyncSandbox.create(image)``, or another
@@ -30,14 +22,14 @@ class AsyncSandbox:
         self.id: int = sandbox["id"]
         self._path = f"/sandboxes/{self.id}"
         self.name: str = sandbox["spec"]["name"]
-        self.commands = AsyncCommands(self)
-        self.files = AsyncFiles(self)
 
     @classmethod
     async def create(
         cls,
         image: str,
         *,
+        command: Optional[list[str]] = None,
+        entrypoint: Optional[str] = None,
         cpus: Optional[int] = None,
         memory_mib: Optional[int] = None,
         seed: Optional[int] = None,
@@ -46,13 +38,20 @@ class AsyncSandbox:
         api_key: Optional[str] = None,
         api_url: Optional[str] = None,
     ) -> AsyncSandbox:
-        """A sandbox of ``image`` (as ``docker run`` takes it), once it's
-        running. Left out: 1 vCPU, 1024 MiB, seed 0, no variables beyond the
-        image's, and named after the image."""
+        """A sandbox of ``image`` (as ``docker run`` takes it), once its
+        program started. Left out: the image's own command and entrypoint,
+        1 vCPU, 1024 MiB, seed 0, no variables beyond the image's, and named
+        after the image."""
         draft: dict[str, Any] = {"image": image}
-        for field, value in (("cpus", cpus), ("memory_mib", memory_mib), ("seed", seed), ("name", name)):
-            if value is not None:
-                draft[field] = value
+        given = {
+            "command": command,
+            "entrypoint": entrypoint,
+            "cpus": cpus,
+            "memory_mib": memory_mib,
+            "seed": seed,
+            "name": name,
+        }
+        draft.update({field: value for field, value in given.items() if value is not None})
         if env:
             draft["environment"] = [{"name": key, "value": value} for key, value in env.items()]
         connection = Connection(api_key, api_url)
@@ -81,7 +80,7 @@ class AsyncSandbox:
             raise
 
     async def state(self) -> RunState:
-        """Where it is: ``queued``, ``running``, ``paused``, ``stopped``, ``failed``."""
+        """Where it is: ``queued``, ``running``, ``paused``, ``exited``, ``stopped``, ``failed``."""
         sandbox = await self._connection.json("GET", self._path)
         return RunState.from_api(sandbox["run"]["state"])
 
@@ -92,16 +91,31 @@ class AsyncSandbox:
         await self._while_live(self._connection.json("POST", f"{self._path}/resume"))
 
     async def stop(self) -> None:
-        """Stops it, which ends its execution, and returns once its log is
-        in, so that the execution replays. A sandbox that already ended
-        stays as it is."""
+        """Stops it. A stopped sandbox's log is cut short, and doesn't
+        replay. One that already ended stays as it is."""
         try:
-            run = await self._connection.json("POST", f"{self._path}/stop")
+            await self._connection.json("POST", f"{self._path}/stop")
         except ConflictError:
-            run = (await self._connection.json("GET", self._path))["run"]
-            if RunState.from_api(run["state"]).is_active:
+            if (await self.state()).is_active:
                 raise
-        await self._wait_for_log(run)
+
+    async def wait(self) -> int:
+        """The program's exit code; stopped and failed runs raise their error."""
+        sandbox = await self._connection.json("GET", self._path)
+        while True:
+            run = sandbox["run"]
+            state = RunState.from_api(run["state"])
+            if state.kind == "exited":
+                return state.exit_code
+            if not state.is_active:
+                raise _ended_error(self.id, state)
+            sandbox = await self._connection.json(
+                "GET", self._path, params={"newer_than": run["version"]}
+            )
+
+    async def output(self) -> Output:
+        """What the program wrote so far (``Output``)."""
+        return Output.from_api(await self._connection.json("GET", f"/executions/{self.id}/output"))
 
     async def close(self) -> None:
         """Closes its connection; the sandbox goes on."""
@@ -121,29 +135,13 @@ class AsyncSandbox:
         while True:
             run = sandbox["run"]
             state = RunState.from_api(run["state"])
-            if state.kind == "running":
+            if state.kind in ("running", "paused", "exited"):
                 return
             if not state.is_active:
                 raise _ended_error(self.id, state)
             sandbox = await self._connection.json(
                 "GET", self._path, params={"newer_than": run["version"]}
             )
-
-    async def _wait_for_log(self, run: Mapping[str, Any]) -> None:
-        """A stopped sandbox's runner ends dvm, then reports its log's size
-        as the run's next version; one that never reached a runner has none."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _LOG_WAIT_SECONDS
-        while (
-            run["state"]["kind"] == "stopped"
-            and run["runner"] is not None
-            and run["log_bytes"] is None
-            and loop.time() < deadline
-        ):
-            sandbox = await self._connection.json(
-                "GET", self._path, params={"newer_than": run["version"]}
-            )
-            run = sandbox["run"]
 
     async def _while_live(self, call: Awaitable[T]) -> T:
         """The call's answer; if it's refused because the sandbox ended,

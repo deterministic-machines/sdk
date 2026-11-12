@@ -31,36 +31,15 @@ export interface ApiSandbox {
 }
 
 export interface ApiExecution extends ApiSandbox {
-  commands: ApiCommand[];
   replays: ApiRun[];
 }
 
-export type ApiCommandKind = "starting" | "running" | "exited" | "refused" | "unfinished";
-
-export interface ApiCommand {
-  number: number;
-  command: string | string[];
-  argv: string[] | null;
-  state: { kind: ApiCommandKind; code?: number; signal?: number; reason?: string };
-  started_at: number | null;
-  ended_at: number | null;
-}
-
-export type ApiOutputEvent =
-  | { kind: "output"; stream: "stdout" | "stderr"; offset: number; chunk: string }
-  | { kind: "command"; command: ApiCommand };
-
-export type ApiVerdictKind = "same" | "other_exit" | "other_output" | "other_command";
+export type ApiVerdictKind = "same" | "other_exit" | "other_output";
 
 export interface ApiVerdict {
   kind: ApiVerdictKind;
-  command?: number;
   stream?: "stdout" | "stderr";
   at?: number;
   recorded?: number;
   replayed?: number;
 }
-
-export type ApiMoment =
-  | { kind: "event"; thread: number; operation: number }
-  | { kind: "time"; at_us: number };

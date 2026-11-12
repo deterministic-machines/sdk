@@ -2,11 +2,7 @@ import os
 
 import pytest
 
-from dvm import Sandbox
 
-# dvm-platform's tests run these against a stand-in sandbox, which runs
-# commands on the host from a directory of its own, so paths in these are
-# relative to it, as they are to alpine's working directory, `/`.
 IMAGE = "alpine:3.20"
 
 
@@ -23,9 +19,3 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "platform" in item.keywords:
             item.add_marker(skip)
-
-
-@pytest.fixture
-def sandbox():
-    with Sandbox.create(IMAGE) as sandbox:
-        yield sandbox

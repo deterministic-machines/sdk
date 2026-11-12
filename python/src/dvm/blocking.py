@@ -1,23 +1,14 @@
 """The blocking API: the async one, each call run to its end on an event
 loop of the SDK's own, in a thread, so that it works from any code, an
-event loop's too. Output callbacks are called in that thread."""
+event loop's too."""
 
 from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, Coroutine, Iterable, Mapping, Optional, TypeVar, Union
+from typing import Any, Coroutine, Mapping, Optional, TypeVar
 
-from dvm.commands import (
-    AsyncCommandHandle,
-    AsyncCommands,
-    CommandInfo,
-    CommandLine,
-    CommandResult,
-    OutputCallback,
-)
-from dvm.execution import AsyncExecution, AsyncReplay, Moment, Verdict
-from dvm.files import AsyncFiles
+from dvm.execution import AsyncExecution, AsyncReplay, Output, Verdict
 from dvm.run_state import RunState
 from dvm.sandbox import AsyncSandbox
 
@@ -63,14 +54,14 @@ class Sandbox:
         self._sandbox = sandbox
         self.id = sandbox.id
         self.name = sandbox.name
-        self.commands = Commands(sandbox.commands)
-        self.files = Files(sandbox.files)
 
     @classmethod
     def create(
         cls,
         image: str,
         *,
+        command: Optional[list[str]] = None,
+        entrypoint: Optional[str] = None,
         cpus: Optional[int] = None,
         memory_mib: Optional[int] = None,
         seed: Optional[int] = None,
@@ -84,6 +75,8 @@ class Sandbox:
             _run(
                 AsyncSandbox.create(
                     image,
+                    command=command,
+                    entrypoint=entrypoint,
                     cpus=cpus,
                     memory_mib=memory_mib,
                     seed=seed,
@@ -115,8 +108,14 @@ class Sandbox:
         _run(self._sandbox.resume())
 
     def stop(self) -> None:
-        """Stops it, and returns once its execution replays (:meth:`AsyncSandbox.stop`)."""
+        """Stops it if active; its cut recording cannot replay."""
         _run(self._sandbox.stop())
+
+    def wait(self) -> int:
+        return _run(self._sandbox.wait())
+
+    def output(self) -> Output:
+        return _run(self._sandbox.output())
 
     def close(self) -> None:
         _run(self._sandbox.close())
@@ -128,89 +127,6 @@ class Sandbox:
         _run(self._sandbox.__aexit__())
 
 
-class Commands:
-    """A sandbox's commands: ``sandbox.commands``."""
-
-    def __init__(self, commands: AsyncCommands) -> None:
-        self._commands = commands
-
-    def run(
-        self,
-        command: CommandLine,
-        *,
-        background: bool = False,
-        cwd: Optional[str] = None,
-        env: Optional[Mapping[str, str]] = None,
-        stdin: Union[bool, bytes, str] = False,
-        timeout: Optional[float] = None,
-        on_stdout: Optional[OutputCallback] = None,
-        on_stderr: Optional[OutputCallback] = None,
-    ) -> Union[CommandResult, CommandHandle]:
-        """Runs ``command`` to its exit, or starts it with
-        ``background=True`` (:meth:`AsyncCommands.run`)."""
-        ran = _run(
-            self._commands.run(
-                command,
-                background=background,
-                cwd=cwd,
-                env=env,
-                stdin=stdin,
-                timeout=timeout,
-                on_stdout=on_stdout,
-                on_stderr=on_stderr,
-            )
-        )
-        return CommandHandle(ran) if isinstance(ran, AsyncCommandHandle) else ran
-
-
-class CommandHandle:
-    """A command started in the background."""
-
-    def __init__(self, handle: AsyncCommandHandle) -> None:
-        self._handle = handle
-        self.number = handle.number
-
-    def wait(
-        self,
-        *,
-        timeout: Optional[float] = None,
-        on_stdout: Optional[OutputCallback] = None,
-        on_stderr: Optional[OutputCallback] = None,
-    ) -> CommandResult:
-        return _run(self._handle.wait(timeout=timeout, on_stdout=on_stdout, on_stderr=on_stderr))
-
-    def send_stdin(self, data: Union[bytes, str], *, close: bool = False) -> None:
-        _run(self._handle.send_stdin(data, close=close))
-
-    def close_stdin(self) -> None:
-        _run(self._handle.close_stdin())
-
-    def signal(self, signal: int) -> None:
-        _run(self._handle.signal(signal))
-
-    def kill(self) -> None:
-        _run(self._handle.kill())
-
-    def info(self) -> CommandInfo:
-        return _run(self._handle.info())
-
-
-class Files:
-    """A sandbox's files: ``sandbox.files``."""
-
-    def __init__(self, files: AsyncFiles) -> None:
-        self._files = files
-
-    def write(self, path: str, data: Union[bytes, str], *, mode: Optional[int] = None) -> None:
-        _run(self._files.write(path, data, mode=mode))
-
-    def read(self, path: str) -> bytes:
-        return _run(self._files.read(path))
-
-    def read_text(self, path: str, encoding: str = "utf-8") -> str:
-        return _run(self._files.read_text(path, encoding))
-
-
 class Execution:
     """A sandbox's execution, from ``Execution.get(sandbox_id)`` (:class:`AsyncExecution`)."""
 
@@ -220,7 +136,6 @@ class Execution:
         self.spec = execution.spec
         self.state = execution.state
         self.log_bytes = execution.log_bytes
-        self.commands = execution.commands
         self.replays = [Replay(replay) for replay in execution.replays]
 
     @classmethod
@@ -233,11 +148,8 @@ class Execution:
     ) -> Execution:
         return cls(_run(AsyncExecution.get(execution_id, api_key=api_key, api_url=api_url)))
 
-    def replay(self, *, watch: Iterable[str] = (), held: bool = False) -> Replay:
-        return Replay(_run(self._execution.replay(watch=watch, held=held)))
-
-    def machine(self, at: Moment) -> Mapping[str, Any]:
-        return _run(self._execution.machine(at))
+    def replay(self) -> Replay:
+        return Replay(_run(self._execution.replay()))
 
     def close(self) -> None:
         _run(self._execution.close())
@@ -261,14 +173,8 @@ class Replay:
     def wait(self) -> Verdict:
         return _run(self._replay.wait())
 
-    def seek(self, to: Moment) -> Mapping[str, Any]:
-        return _run(self._replay.seek(to))
-
     def stop(self) -> None:
         _run(self._replay.stop())
 
-    def commands(self) -> list[CommandInfo]:
-        return _run(self._replay.commands())
-
-    def events(self) -> Mapping[str, Any]:
-        return _run(self._replay.events())
+    def output(self) -> Output:
+        return _run(self._replay.output())

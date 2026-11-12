@@ -1,9 +1,9 @@
 # dvm.run SDKs
 
 Clients for [dvm.run](https://dvm.run): sandboxes whose every run
-replays. Your agent makes a sandbox from an image, sends it commands and
-files, and stops it; everything it ran is its execution, which replays,
-the same, once it ends.
+replays. Your agent makes a sandbox from an image and a command, waits for
+it, and reads its exit code and output; what it ran is its execution, which
+replays, the same, once it exited.
 
 | Language | Directory | Package |
 | --- | --- | --- |
@@ -12,8 +12,8 @@ the same, once it ends.
 | Rust | [`rust/`](rust) | [`dvm-run`](https://crates.io/crates/dvm-run), over [`dvm-api`](https://crates.io/crates/dvm-api) |
 
 They call the same API and change together, so they live here together.
-Each is released on its own tag: `python-v0.1.0`, `js-v0.1.0`,
-`rust-v0.1.0`. The Rust crates hold the API's types (`dvm-api`), which
+Each is released on its own tag: `python-v0.2.0`, `js-v0.2.0`,
+`rust-v0.2.0`. The Rust crates hold the API's types (`dvm-api`), which
 dvm.run's controller is built over.
 
 ## Developing

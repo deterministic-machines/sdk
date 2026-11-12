@@ -64,16 +64,10 @@ impl Sandbox {
             .find(|member| member.id == id)
     }
 
-    /// Whether its run may be replayed, and why not (`Run`'s rules): its
-    /// recording is whole if it exited; or, a sandbox that takes commands,
-    /// if it was stopped too, as its runner has dvm end it.
+    /// Whether its exited run has a whole log its runner can replay.
     pub fn replayable(&self) -> Result<(), String> {
-        let whole = match self.run.state {
-            RunState::Exited { .. } => true,
-            RunState::Stopped => self.spec.takes_commands(),
-            _ => false,
-        };
-        self.run.replayable_if_whole(whole)
+        self.run
+            .replayable_if_whole(matches!(self.run.state, RunState::Exited { .. }))
     }
 
     /// Whether a run of it is going, its own or a replay.
@@ -259,14 +253,6 @@ impl SandboxSpec {
             cpus: self.cpus,
             memory_mib: u64::from(self.memory_mib) + Self::DVM_OWN_MEMORY_MIB,
         }
-    }
-
-    /// Whether a sandbox of this spec takes commands (`SandboxCommand`): one
-    /// made with neither a command nor an entrypoint runs nothing until it's
-    /// sent its first, and ends as it's stopped.
-    /// One made with either runs it, and ends with it.
-    pub fn takes_commands(&self) -> bool {
-        self.entrypoint.is_none() && self.command.is_empty()
     }
 
     /// Lowercase letters, digits and inner `-`, as a DNS label.
@@ -487,7 +473,7 @@ mod tests {
                 ..SandboxDraft::default()
             }
         );
-        assert!(spec.takes_commands());
+        assert!(spec.command().is_empty() && spec.entrypoint().is_none());
     }
 
     #[test]
@@ -572,19 +558,18 @@ mod tests {
         assert_eq!(run(2, Some(1), exited, 0).sandbox(), sandbox.id);
     }
 
-    /// A stopped run's recording is cut short, but a sandbox's that takes
-    /// commands, which its runner has dvm end whole.
+    /// A stopped run's recording is cut short: only an exited one replays.
     #[test]
-    fn a_stopped_sandbox_that_takes_commands_replays() {
+    fn only_an_exited_run_replays() {
         use crate::Timestamp;
-        let stopped = |draft: SandboxDraft| Sandbox {
+        let sandbox = |state: RunState| Sandbox {
             id: SandboxId::new(1),
             owner: None,
-            spec: SandboxSpec::try_from(draft).unwrap(),
+            spec: SandboxSpec::try_from(draft()).unwrap(),
             run: Run {
                 id: RunId::new(1),
                 replay_of: None,
-                state: RunState::Stopped,
+                state,
                 runner: Some("test".to_owned()),
                 created_at: Timestamp::from_unix_millis(0),
                 started_at: None,
@@ -596,16 +581,8 @@ mod tests {
             },
             replays: vec![],
         };
-        assert!(
-            stopped(draft())
-                .replayable()
-                .unwrap_err()
-                .contains("cut short")
-        );
-        let taking = stopped(SandboxDraft {
-            command: Vec::new(),
-            ..draft()
-        });
-        assert_eq!(taking.replayable(), Ok(()));
+        let stopped = sandbox(RunState::Stopped).replayable().unwrap_err();
+        assert!(stopped.contains("cut short"), "{stopped}");
+        assert_eq!(sandbox(RunState::Exited { code: 3 }).replayable(), Ok(()));
     }
 }
