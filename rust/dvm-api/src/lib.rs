@@ -13,6 +13,7 @@ mod execution;
 mod image_reference;
 mod run;
 mod sandbox;
+mod sandbox_protocol;
 mod timestamp;
 mod user;
 
@@ -28,6 +29,10 @@ pub use run::{
 pub use sandbox::{
     EnvironmentVariable, Sandbox, SandboxDraft, SandboxId, SandboxSpec, SandboxesPage, SpecError,
     SpecField,
+};
+pub use sandbox_protocol::{
+    SandboxAnswer, SandboxAnswerKind, SandboxExited, SandboxProgram, SandboxRead, SandboxRequest,
+    SandboxRequestAction, SandboxRun, SandboxStarted, SandboxStdin, SandboxWrite,
 };
 pub use timestamp::Timestamp;
 pub use user::{Me, UserLimits};
@@ -67,6 +72,8 @@ pub fn export_typescript(config: &ts_rs::Config) -> Result<(), ts_rs::ExportErro
     RunOutput::export_all(config)?;
     RunState::export_all(config)?;
     Sandbox::export_all(config)?;
+    SandboxRequest::export_all(config)?;
+    SandboxAnswer::export_all(config)?;
     SandboxDraft::export_all(config)?;
     SandboxId::export_all(config)?;
     SandboxSpec::export_all(config)?;
@@ -89,8 +96,30 @@ mod typescript_tests {
             "export type Sandbox = ",
             "export type ApiError = ",
             "export type Me = ",
+            "export type SandboxRequest = ",
+            "export type SandboxAnswer = ",
         ] {
             assert!(written.contains(declaration), "{declaration}");
+        }
+        for (name, fields) in [
+            ("SandboxRun", &["env", "cwd", "stdin"][..]),
+            ("SandboxStdin", &["data", "close"][..]),
+            ("SandboxWrite", &["mode", "last"][..]),
+            ("SandboxAnswer", &["id"][..]),
+        ] {
+            let declaration = written
+                .split_once(&format!("export type {name} = "))
+                .unwrap()
+                .1
+                .split(';')
+                .next()
+                .unwrap();
+            for field in fields {
+                assert!(
+                    declaration.contains(&format!("{field}?:")),
+                    "{name}.{field}: {declaration}"
+                );
+            }
         }
     }
 }

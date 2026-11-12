@@ -12,8 +12,31 @@
       system:
       let
         pkgs = import nixpkgs { inherit system; };
+        sandboxServer = pkgs.pkgsStatic.rustPlatform.buildRustPackage {
+          pname = "sandbox-server";
+          version = (pkgs.lib.importTOML ./rust/sandbox-server/Cargo.toml).package.version;
+          src = pkgs.lib.fileset.toSource {
+            root = ./rust;
+            fileset = pkgs.lib.fileset.unions [
+              ./rust/Cargo.toml
+              ./rust/Cargo.lock
+              ./rust/dvm-api
+              ./rust/dvm-run
+              ./rust/sandbox-server
+            ];
+          };
+          cargoLock.lockFile = ./rust/Cargo.lock;
+          cargoBuildFlags = [ "--package" "sandbox-server" ];
+          preBuild = "unset NIX_CFLAGS_LINK";
+          doCheck = false;
+          meta.platforms = [ "x86_64-linux" ];
+        };
       in
       {
+        packages = pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          sandbox-server = sandboxServer;
+          default = sandboxServer;
+        };
         devShells.default = pkgs.mkShell {
           packages = [
             # The Python SDK's tests, and its build for PyPI.
