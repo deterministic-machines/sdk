@@ -14,35 +14,38 @@ no one is there to approve one, such as CI, make a key on
 [dvm.run's API keys page](https://sandbox.dvm.run/keys) and set
 `DVM_API_KEY`.
 
-A sandbox is a VM made from an image: your agent sends it commands and
-files until it stops it. Everything it ran is its execution, which
-replays, the same, once it ends.
+A sandbox is one recorded run of one program: the image's own command, or
+the command and entrypoint you give as you make it. It ends when the program
+exits. Its execution replays, the same, once the program exited.
 
 ```python
 from dvm import Sandbox, Execution
 
-with Sandbox.create("python:3.12", seed=7) as sbx:
-    sbx.files.write("/app/main.py", "print(1 + 1)\n")
-    r = sbx.commands.run("python main.py", cwd="/app", timeout=60)
-    print(r.stdout, r.exit_code)
+with Sandbox.create("python:3.12", command=["python", "-c", "print(1 + 1)"], seed=7) as sandbox:
+    print(sandbox.wait())
+    print(sandbox.output().stdout.decode())
 
-    server = sbx.commands.run(["python", "-m", "http.server"], background=True)
-    server.kill()
-    server.wait()
-
-verdict = Execution.get(sbx.id).replay().wait()
-assert verdict.same
+execution = Execution.get(sandbox.id)
+replay = execution.replay()
+assert replay.wait().same
+print(replay.output().stdout.decode())
+execution.close()
 ```
 
-It takes dvm.run's address as `api_url=`, else `DVM_API_URL`, and its key
-as `api_key=`, else `DVM_API_KEY`, else the one `dvm-run login` saved for
-that address. `AsyncSandbox` and `AsyncExecution` are the same API for
-asyncio.
-
-- A string runs in the sandbox's shell (`/bin/bash -lc`, or `/bin/sh -c`
-  in an image without bash); a list runs as it is.
-- A command's exit code is never an exception. A sandbox that ended raises
-  `SandboxEndedError` (`SandboxFailedError`, with dvm's reason, if it
-  failed) on the next call.
-- `timeout=` kills the command once it passes; its result says so, with
-  code 137 and signal 9.
+- Making a sandbox returns once its program started; one that already
+  exited is fine.
+- The program's exit code is never an error. `wait()` raises `SandboxEndedError` for a sandbox that
+  was stopped, and `SandboxFailedError`, with dvm's reason, for one that
+  failed.
+- Output is bytes. In dvm a program's stdout and stderr are one stream, in
+  the order it wrote them: `stdout`. `stderr` is what dvm itself said.
+- `pause`, `resume` and `stop` act on a sandbox that is going. A stopped
+  sandbox's log is cut short, and doesn't replay.
+- A replay's verdict is `same`, `other_exit` (both codes) or `other_output`
+  (the stream, and the first byte that differs).
+- As a context manager, a sandbox still going is stopped at the end.
+  `AsyncSandbox`, `AsyncExecution` and `AsyncReplay` are the same API for
+  asyncio.
+- It takes dvm.run's address from `DVM_API_URL`, and its key from
+  `DVM_API_KEY`, else the one `dvm-run login` saved for that address; both
+  may be given in code instead.

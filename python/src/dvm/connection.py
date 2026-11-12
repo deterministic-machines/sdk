@@ -1,11 +1,10 @@
 """The connection to dvm.run's API: its address, the key every request
-bears, what a refusal means, and server-sent events."""
+bears, and what a refusal means."""
 
 from __future__ import annotations
 
-import json
 import os
-from typing import Any, AsyncIterator, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 import httpx
 
@@ -69,34 +68,6 @@ class Connection:
         """The answer's JSON; None for an empty one."""
         response = await self._send(method, path, params=params, json=body)
         return response.json() if response.content else None
-
-    async def bytes(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: Optional[Mapping[str, Any]] = None,
-        content: Optional[bytes] = None,
-    ) -> bytes:
-        """The answer's body, as it is."""
-        response = await self._send(method, path, params=params, content=content)
-        return response.content
-
-    async def events(
-        self, path: str, *, params: Optional[Mapping[str, Any]] = None
-    ) -> AsyncIterator[Any]:
-        """Each server-sent event's data, as JSON, until the stream ends."""
-        async with self._client.stream("GET", path, params=params) as response:
-            if response.is_error:
-                await response.aread()
-                raise refusal_of(response)
-            data: list[str] = []
-            async for line in response.aiter_lines():
-                if line.startswith("data:"):
-                    data.append(line[5:].removeprefix(" "))
-                elif line == "" and data:
-                    yield json.loads("\n".join(data))
-                    data = []
 
     async def close(self) -> None:
         await self._client.aclose()

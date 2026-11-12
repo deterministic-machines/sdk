@@ -1,20 +1,15 @@
-/** A sandbox: a VM made from an image, which takes commands and files until
- * it's stopped. Everything it ran is its execution, under its id. */
-
 import type { ApiRun, ApiSandbox } from "./api-json.ts";
-import { Commands } from "./commands.ts";
 import { type CallOptions, type ClientOptions, Connection } from "./connection.ts";
 import { ConflictError } from "./errors.ts";
-import { Files } from "./files.ts";
+import { type Output, outputOf } from "./execution.ts";
 import { RunState } from "./run-state.ts";
 import { endedErrorOf, SandboxCalls } from "./sandbox-calls.ts";
-
-// A stopped sandbox's runner reports its log within this, or went away.
-const LOG_WAIT_MS = 60_000;
 
 /** What a sandbox is made of; left out: 1 vCPU, 1024 MiB, seed 0, no
  * variables beyond the image's, and named after the image. */
 export interface SandboxOptions extends ClientOptions, CallOptions {
+  command?: string[];
+  entrypoint?: string;
   cpus?: number;
   memoryMib?: number;
   seed?: number;
@@ -26,8 +21,6 @@ export class Sandbox implements AsyncDisposable {
   /** Its execution's id too. */
   readonly id: number;
   readonly name: string;
-  readonly commands: Commands;
-  readonly files: Files;
   readonly #calls: SandboxCalls;
 
   /** A handle, over `connection`, to the sandbox the API answered with:
@@ -36,14 +29,14 @@ export class Sandbox implements AsyncDisposable {
     this.id = sandbox.id;
     this.name = sandbox.spec.name;
     this.#calls = new SandboxCalls(connection, sandbox.id);
-    this.commands = new Commands(this.#calls);
-    this.files = new Files(this.#calls);
   }
 
   /** A sandbox of `image` (as `docker run` takes it), once it's running.
    * A `signal` that aborts while it starts stops it. */
   static async create(image: string, options: SandboxOptions = {}): Promise<Sandbox> {
     const draft: Record<string, unknown> = { image };
+    if (options.command !== undefined) draft.command = options.command;
+    if (options.entrypoint !== undefined) draft.entrypoint = options.entrypoint;
     if (options.cpus !== undefined) draft.cpus = options.cpus;
     if (options.memoryMib !== undefined) draft.memory_mib = options.memoryMib;
     if (options.seed !== undefined) draft.seed = options.seed;
@@ -72,7 +65,7 @@ export class Sandbox implements AsyncDisposable {
     return new Sandbox(connection, sandbox);
   }
 
-  /** Where it is: `queued`, `running`, `paused`, `stopped`, `failed`. */
+  /** Where it is: `queued`, `running`, `paused`, `exited`, `stopped`, `failed`. */
   state(options: CallOptions = {}): Promise<RunState> {
     return this.#calls.state(options);
   }
@@ -85,9 +78,7 @@ export class Sandbox implements AsyncDisposable {
     await this.#act("resume", options);
   }
 
-  /** Stops it, which ends its execution, and returns once its log is in,
-   * so that the execution replays. A sandbox that already ended stays as
-   * it is. */
+  /** Stops an active run. Its cut recording cannot replay. */
   async stop(options: CallOptions = {}): Promise<void> {
     const calls = this.#calls;
     let run: ApiRun;
@@ -98,7 +89,21 @@ export class Sandbox implements AsyncDisposable {
       run = (await calls.connection.json<ApiSandbox>("GET", calls.path, options)).run;
       if (new RunState(run.state).isActive) throw refused;
     }
-    await this.#waitForLog(run, options.signal);
+  }
+
+  /** The program's exit code; stopped and failed runs throw their error. */
+  async wait(options: CallOptions = {}): Promise<number> {
+    let run = (await this.#calls.connection.json<ApiSandbox>("GET", this.#calls.path, options)).run;
+    for (;;) {
+      const state = new RunState(run.state);
+      if (run.state.kind === "exited") return run.state.code!;
+      if (!state.isActive) throw endedErrorOf(this.id, state);
+      run = (await this.#newerThan(run, options.signal)).run;
+    }
+  }
+
+  async output(options: CallOptions = {}): Promise<Output> {
+    return outputOf(await this.#calls.connection.json("GET", `/executions/${this.id}/output`, options));
   }
 
   /** `await using` stops it at the scope's end. */
@@ -114,22 +119,8 @@ export class Sandbox implements AsyncDisposable {
   async #waitUntilRunning(run: ApiRun, signal?: AbortSignal): Promise<void> {
     for (;;) {
       const state = new RunState(run.state);
-      if (state.kind === "running") return;
+      if (["running", "paused", "exited"].includes(state.kind)) return;
       if (!state.isActive) throw endedErrorOf(this.id, state);
-      run = (await this.#newerThan(run, signal)).run;
-    }
-  }
-
-  /** A stopped sandbox's runner ends dvm, then reports its log's size as the
-   * run's next version; one that never reached a runner has none. */
-  async #waitForLog(run: ApiRun, signal?: AbortSignal): Promise<void> {
-    const deadline = Date.now() + LOG_WAIT_MS;
-    while (
-      run.state.kind === "stopped" &&
-      run.runner !== null &&
-      run.log_bytes === null &&
-      Date.now() < deadline
-    ) {
       run = (await this.#newerThan(run, signal)).run;
     }
   }

@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use dvm_api::{CommandNumber, RunId, RunState, SandboxId};
+use dvm_api::{RunId, RunState, SandboxId};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// What the SDK returns when a call fails. A command's exit code is never
+/// What the SDK returns when a call fails. A program's exit code is never
 /// one of these.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -16,7 +16,7 @@ pub enum Error {
     /// 401: the API key was revoked, or isn't one.
     #[error("401: {reason}")]
     Authentication { reason: String },
-    /// 404: no such sandbox, command, execution or replay, or not the key's
+    /// 404: no such sandbox, execution or replay, or not the key's
     /// user's.
     #[error("404: {reason}")]
     NotFound { reason: String },
@@ -34,13 +34,6 @@ pub enum Error {
     /// serve, a limit, its runner going away.
     #[error("sandbox {sandbox} failed: {reason}")]
     SandboxFailed { sandbox: SandboxId, reason: String },
-    /// The sandbox didn't take the command, and why: a script in an image
-    /// with no shell, a command too long.
-    #[error("command {number} was refused: {reason}")]
-    CommandRefused {
-        number: CommandNumber,
-        reason: String,
-    },
     /// A replay ended without a verdict: dvm saw it part from its execution
     /// and failed it, with where, or it was stopped.
     #[error("replay {replay} {}{}", state.kind(), failure_of(state))]

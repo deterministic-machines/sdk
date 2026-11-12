@@ -1,6 +1,3 @@
-/** A sandbox's calls, which its commands and files make too: its
- * connection, its path, and what a refusal means once it ended. */
-
 import type { ApiSandbox } from "./api-json.ts";
 import type { CallOptions, Connection } from "./connection.ts";
 import { ConflictError, SandboxEndedError, SandboxFailedError } from "./errors.ts";

@@ -9,31 +9,18 @@
 mod api_key;
 mod capacity;
 mod cli_login;
-mod command;
 mod execution;
-mod file;
 mod image_reference;
-mod replay;
 mod run;
 mod sandbox;
 mod timestamp;
 mod user;
-mod watched;
 
 pub use api_key::{ApiKey, CreatedApiKey, NewApiKey};
 pub use capacity::Capacity;
 pub use cli_login::{CliLogin, CollectCliLogin, NewCliLogin, StartedCliLogin};
-pub use command::{
-    CommandLine, CommandNumber, CommandOutputEvent, CommandSignal, CommandState, CommandStdin,
-    NewCommand, SandboxCommand,
-};
 pub use execution::Execution;
-pub use file::{FileMode, SandboxPath};
 pub use image_reference::{ImageReference, InvalidImageReference};
-pub use replay::{
-    MachineState, MemoryRegion, Moment, NewReplay, OpenFile, ProcessState, ReplayStop, Seek,
-    StoppedThread, ThreadState, ThreadWait,
-};
 pub use run::{
     ByteChunk, InvalidRunAction, OutputStream, ReplayVerdict, Run, RunAction, RunId, RunOutput,
     RunState,
@@ -44,7 +31,6 @@ pub use sandbox::{
 };
 pub use timestamp::Timestamp;
 pub use user::{Me, UserLimits};
-pub use watched::{EventPosition, WatchKind, WatchKinds, WatchedEvent, WatchedEvents};
 
 use serde::{Deserialize, Serialize};
 
@@ -67,29 +53,13 @@ pub fn export_typescript(config: &ts_rs::Config) -> Result<(), ts_rs::ExportErro
     ByteChunk::export_all(config)?;
     Capacity::export_all(config)?;
     CliLogin::export_all(config)?;
-    CommandLine::export_all(config)?;
-    CommandNumber::export_all(config)?;
-    CommandOutputEvent::export_all(config)?;
-    CommandSignal::export_all(config)?;
-    CommandState::export_all(config)?;
-    CommandStdin::export_all(config)?;
     CreatedApiKey::export_all(config)?;
     EnvironmentVariable::export_all(config)?;
-    EventPosition::export_all(config)?;
     Execution::export_all(config)?;
-    FileMode::export_all(config)?;
     ImageReference::export_all(config)?;
-    MachineState::export_all(config)?;
     Me::export_all(config)?;
-    MemoryRegion::export_all(config)?;
-    Moment::export_all(config)?;
     NewApiKey::export_all(config)?;
-    NewCommand::export_all(config)?;
-    NewReplay::export_all(config)?;
-    OpenFile::export_all(config)?;
     OutputStream::export_all(config)?;
-    ProcessState::export_all(config)?;
-    ReplayStop::export_all(config)?;
     ReplayVerdict::export_all(config)?;
     Run::export_all(config)?;
     RunAction::export_all(config)?;
@@ -97,22 +67,12 @@ pub fn export_typescript(config: &ts_rs::Config) -> Result<(), ts_rs::ExportErro
     RunOutput::export_all(config)?;
     RunState::export_all(config)?;
     Sandbox::export_all(config)?;
-    SandboxCommand::export_all(config)?;
     SandboxDraft::export_all(config)?;
     SandboxId::export_all(config)?;
-    SandboxPath::export_all(config)?;
     SandboxSpec::export_all(config)?;
     SandboxesPage::export_all(config)?;
-    Seek::export_all(config)?;
-    StoppedThread::export_all(config)?;
-    ThreadState::export_all(config)?;
-    ThreadWait::export_all(config)?;
     Timestamp::export_all(config)?;
     UserLimits::export_all(config)?;
-    WatchKind::export_all(config)?;
-    WatchKinds::export_all(config)?;
-    WatchedEvent::export_all(config)?;
-    WatchedEvents::export_all(config)?;
     Ok(())
 }
 

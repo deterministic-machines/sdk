@@ -1,96 +1,63 @@
-"""The SDK against answers of the test's own: what needs no platform."""
-
+"""Lifecycle and byte output against fixed HTTP answers."""
 import asyncio
 import base64
-import json
 
 import httpx
 import pytest
 
-from dvm import AsyncCommandHandle, AsyncSandbox, DvmError, SandboxFailedError
+from dvm import AsyncSandbox, DvmError, SandboxEndedError, SandboxFailedError, Verdict
 from dvm.connection import Connection
-from dvm.execution import _moment_of
 
 
 def sandbox_answered_by(answer):
-    transport = httpx.MockTransport(answer)
-    connection = Connection("dvm_test", "http://dvm.test", transport=transport)
+    connection = Connection("dvm_test", "http://dvm.test", transport=httpx.MockTransport(answer))
     return AsyncSandbox(connection, {"id": 5, "spec": {"name": "test"}})
 
 
-def events(*sent):
-    body = "".join(f": kept alive\n\ndata: {json.dumps(event)}\n\n" for event in sent)
-    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
-
-
-def output(stream, offset, chunk):
-    encoded = base64.b64encode(chunk).decode()
-    return {"kind": "output", "stream": stream, "offset": offset, "chunk": encoded}
-
-
-def command(state):
-    return {
-        "kind": "command",
-        "command": {
-            "number": 1,
-            "command": "printf",
-            "argv": None,
-            "state": state,
-            "started_at": None,
-            "ended_at": None,
-        },
-    }
-
-
-def test_a_dropped_output_stream_is_followed_again_from_where_it_got_to():
-    asked = []
-    e_acute = "é".encode()
-
+def test_wait_uses_versions_and_returns_a_nonzero_exit():
+    states = iter([{"kind": "running"}, {"kind": "exited", "code": 3}])
     def answer(request):
-        assert request.url.path == "/api/sandboxes/5/commands/1/output"
-        asked.append((request.url.params["stdout_offset"], request.url.params["stderr_offset"]))
-        if len(asked) == 1:
-            return events(output("stdout", 0, b"hel"), output("stderr", 0, e_acute[:1]))
-        return events(
-            output("stdout", 3, b"lo"),
-            output("stderr", 1, e_acute[1:]),
-            command({"kind": "exited", "code": 0}),
-        )
-
-    stderr = []
-    handle = AsyncCommandHandle(sandbox_answered_by(answer), 1)
-    result = asyncio.run(handle.wait(on_stderr=stderr.append))
-    assert (result.stdout, result.stderr, stderr) == ("hello", "é", ["é"])
-    assert asked == [("0", "0"), ("3", "1")]
+        if request.url.params:
+            assert request.url.params["newer_than"] == "1"
+        return httpx.Response(200, json={"run": {"state": next(states), "version": 1}})
+    assert asyncio.run(sandbox_answered_by(answer).wait()) == 3
 
 
-def test_a_stream_that_never_ends_its_command_is_an_error():
+@pytest.mark.parametrize("state,error", [
+    ({"kind": "stopped"}, SandboxEndedError),
+    ({"kind": "failed", "reason": "unserved syscall"}, SandboxFailedError),
+])
+def test_wait_reports_stopped_and_failed(state, error):
+    sandbox = sandbox_answered_by(lambda request: httpx.Response(200, json={"run": {"state": state}}))
+    with pytest.raises(error):
+        asyncio.run(sandbox.wait())
+
+
+def test_output_keeps_every_byte():
+    data = bytes(range(256))
     def answer(request):
-        return events(command({"kind": "running"}))
+        assert request.url.path == "/api/executions/5/output"
+        return httpx.Response(200, json={"stdout": base64.b64encode(data).decode(), "stderr": "AA=="})
+    output = asyncio.run(sandbox_answered_by(answer).output())
+    assert (output.stdout, output.stderr) == (data, b"\0")
 
-    handle = AsyncCommandHandle(sandbox_answered_by(answer), 1)
-    with pytest.raises(DvmError, match="ended before its command"):
-        asyncio.run(handle.wait())
 
-
-def test_a_call_refused_as_its_sandbox_failed_says_why():
+def test_create_accepts_an_already_exited_program(monkeypatch):
     def answer(request):
-        if request.method == "POST":
-            return httpx.Response(409, json={"message": "sandbox 5 is failed"})
-        failed = {"kind": "failed", "reason": "syscall 999 isn't served"}
-        return httpx.Response(200, json={"id": 5, "run": {"state": failed}})
+        return httpx.Response(200, json={"id": 5, "spec": {"name": "test"}, "run": {"state": {"kind": "exited", "code": 0}}})
+    monkeypatch.setattr("dvm.sandbox.Connection", lambda *args: Connection("test", "http://dvm.test", transport=httpx.MockTransport(answer)))
+    async def create():
+        sandbox = await AsyncSandbox.create("alpine", command=["true"])
+        await sandbox.close()
+    asyncio.run(create())
 
-    with pytest.raises(SandboxFailedError, match="syscall 999"):
-        asyncio.run(sandbox_answered_by(answer).commands.run("true"))
 
-
-def test_a_moment_is_read_as_dvm_writes_it():
-    assert _moment_of("3:17") == {"kind": "event", "thread": 3, "operation": 17}
-    assert _moment_of("@12.5") == {"kind": "time", "at_us": 12500}
-    assert _moment_of("@7") == {"kind": "time", "at_us": 7000}
+def test_verdict_has_only_program_details():
+    verdict = Verdict.from_api({"kind": "other_output", "stream": "stderr", "at": 7})
+    assert (verdict.stream, verdict.at, verdict.same) == ("stderr", 7, False)
 
 
 def test_a_key_is_needed(monkeypatch):
     monkeypatch.delenv("DVM_API_KEY", raising=False)
     with pytest.raises(DvmError, match="DVM_API_KEY"):
-        Connection()
+        Connection(api_url="http://missing.test")

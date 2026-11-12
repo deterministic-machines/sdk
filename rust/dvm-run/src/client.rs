@@ -1,5 +1,5 @@
 //! The connection to dvm.run's API: its address, the key every request
-//! bears, what a refusal means, and server-sent events.
+//! bears, and what a refusal means.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,40 +119,6 @@ impl Client {
             .map_err(|error| Error::Unexpected(format!("{path}'s answer: {error}")))
     }
 
-    /// The answer's body, as it is.
-    pub(crate) async fn bytes(
-        &self,
-        method: Method,
-        path: &str,
-        query: Query<'_>,
-        content: Option<Vec<u8>>,
-    ) -> Result<Vec<u8>> {
-        let mut request = self.request(method, path, query);
-        if let Some(content) = content {
-            request = request.body(content);
-        }
-        let bytes = self.send(path, request).await?.bytes().await;
-        Ok(bytes
-            .map_err(|error| Error::network(format!("reading {path}"), error))?
-            .to_vec())
-    }
-
-    /// The server-sent events at `path`.
-    pub(crate) async fn events(&self, path: &str, query: Query<'_>) -> Result<EventStream> {
-        let request = self.request(Method::GET, path, query);
-        let answered = tokio::time::timeout(QUIET_LIMIT, self.send(path, request)).await;
-        let response = answered.map_err(|_| Error::Network {
-            context: format!("{path} didn't answer"),
-            source: None,
-        })??;
-        Ok(EventStream {
-            path: path.to_owned(),
-            response,
-            pending: Vec::new(),
-            data: Vec::new(),
-        })
-    }
-
     fn request(&self, method: Method, path: &str, query: Query<'_>) -> RequestBuilder {
         let request = self
             .inner
@@ -185,51 +151,6 @@ impl Client {
             Err(_) => text,
         };
         Err(Error::refusal(status.as_u16(), reason))
-    }
-}
-
-/// Each server-sent event's data, as JSON, until the stream ends. A stream
-/// that goes quiet for longer than the controller lets one is dropped.
-pub(crate) struct EventStream {
-    path: String,
-    response: Response,
-    pending: Vec<u8>,
-    data: Vec<u8>,
-}
-
-impl EventStream {
-    pub(crate) async fn next<T: DeserializeOwned>(&mut self) -> Result<Option<T>> {
-        loop {
-            while let Some(end) = self.pending.iter().position(|&byte| byte == b'\n') {
-                let mut line: Vec<u8> = self.pending.drain(..=end).collect();
-                line.pop();
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                if let Some(data) = line.strip_prefix(b"data:") {
-                    if !self.data.is_empty() {
-                        self.data.push(b'\n');
-                    }
-                    self.data
-                        .extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
-                } else if line.is_empty() && !self.data.is_empty() {
-                    let data = std::mem::take(&mut self.data);
-                    let event = serde_json::from_slice(&data).map_err(|error| {
-                        Error::Unexpected(format!("{}'s event: {error}", self.path))
-                    })?;
-                    return Ok(Some(event));
-                }
-            }
-            let chunk = tokio::time::timeout(QUIET_LIMIT, self.response.chunk()).await;
-            let chunk = chunk.map_err(|_| Error::Network {
-                context: format!("{}'s stream went quiet", self.path),
-                source: None,
-            })?;
-            match chunk.map_err(|error| Error::network(format!("{}'s stream", self.path), error))? {
-                Some(chunk) => self.pending.extend_from_slice(&chunk),
-                None => return Ok(None),
-            }
-        }
     }
 }
 

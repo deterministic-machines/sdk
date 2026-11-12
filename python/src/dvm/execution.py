@@ -4,28 +4,36 @@ execution or not."""
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Optional, Union
+from typing import Any, Mapping, Optional
 
-from dvm.commands import CommandInfo
 from dvm.connection import Connection
 from dvm.errors import ReplayEndedError
 from dvm.run_state import RunState
 
-#: A moment of the execution: ``"<thread>:<operation>"``, before that
-#: thread's operation, or ``"@<milliseconds>"`` into it, as dvm writes them.
-Moment = str
+
+@dataclass(frozen=True)
+class Output:
+    """What a run wrote, as bytes. The program's stdout and stderr are one
+    stream in dvm, in the order it wrote them: ``stdout``. ``stderr`` is
+    what dvm itself said."""
+
+    stdout: bytes
+    stderr: bytes
+
+    @classmethod
+    def from_api(cls, output: Mapping[str, Any]) -> Output:
+        return cls(base64.b64decode(output["stdout"]), base64.b64decode(output["stderr"]))
 
 
 @dataclass(frozen=True)
 class Verdict:
     """Whether a replay was its execution, as far as can be seen from
     outside: ``same``; ``other_exit`` (``recorded`` and ``replayed`` codes);
-    ``other_output`` (the ``stream``, and the byte ``at`` which it parted);
-    or ``other_command``. ``command`` is the command it parted in."""
+    ``other_output`` (the ``stream``, and the byte ``at`` which it parted)."""
 
     kind: str
-    command: Optional[int] = None
     stream: Optional[str] = None
     at: Optional[int] = None
     recorded: Optional[int] = None
@@ -43,7 +51,7 @@ class Verdict:
 class AsyncExecution:
     """A sandbox's execution, from ``await AsyncExecution.get(sandbox_id)``:
     its ``spec`` (image, seed, CPUs, memory, variables), its ``state``, each
-    command it was sent, as it ran, and its log's size once it ended."""
+    replay, and its log's size once it ended."""
 
     def __init__(self, connection: Connection, execution: Mapping[str, Any]) -> None:
         self._connection = connection
@@ -52,7 +60,6 @@ class AsyncExecution:
         run = execution["run"]
         self.state = RunState.from_api(run["state"])
         self.log_bytes: Optional[int] = run["log_bytes"]
-        self.commands = [CommandInfo.from_api(command) for command in execution["commands"]]
         self.replays = [AsyncReplay(connection, replay) for replay in execution["replays"]]
 
     @classmethod
@@ -70,21 +77,10 @@ class AsyncExecution:
             await connection.close()
             raise
 
-    async def replay(self, *, watch: Iterable[str] = (), held: bool = False) -> AsyncReplay:
-        """Replays it, once its sandbox ended, played to its end, watching
-        the events ``watch`` names (``files``, ``network``, ``processes``,
-        ``memory``, ``time``, ``signals``, ``waits``, ``other``,
-        ``page-faults``); or ``held`` at its start, for ``seek``."""
-        new = {"held": held, "watch": list(watch)}
-        replay = await self._connection.json("POST", f"/executions/{self.id}/replays", body=new)
+    async def replay(self) -> AsyncReplay:
+        """Replays the exited program from its whole recording."""
+        replay = await self._connection.json("POST", f"/executions/{self.id}/replays")
         return AsyncReplay(self._connection, replay)
-
-    async def machine(self, at: Moment) -> Mapping[str, Any]:
-        """The machine at the moment ``at``: each process, its threads,
-        files and memory, as dvm describes them."""
-        return await self._connection.json(
-            "GET", f"/executions/{self.id}/machine", params={"at": at}
-        )
 
     async def close(self) -> None:
         await self._connection.close()
@@ -117,33 +113,9 @@ class AsyncReplay:
             raise ReplayEndedError(self.id, self.state)
         return self.verdict
 
-    async def seek(self, to: Moment) -> Mapping[str, Any]:
-        """Takes a held replay to the moment ``to``, and holds it there: the
-        moment, each thread's next operation, and the machine there."""
-        return await self._connection.json(
-            "POST", f"{self._path}/seek", body={"to": _moment_of(to)}
-        )
-
     async def stop(self) -> None:
         self._take(await self._connection.json("POST", f"{self._path}/stop"))
 
-    async def commands(self) -> list[CommandInfo]:
-        """The commands it ran again, oldest first."""
-        commands = await self._connection.json("GET", f"{self._path}/commands")
-        return [CommandInfo.from_api(command) for command in commands]
-
-    async def events(self) -> Mapping[str, Any]:
-        """What it watched, and the events it saw, once it ended."""
-        return await self._connection.json("GET", f"{self._path}/events")
-
-
-def _moment_of(moment: Union[Moment, Mapping[str, Any]]) -> Mapping[str, Any]:
-    """A moment as dvm writes it, as the API takes it."""
-    if not isinstance(moment, str):
-        return moment
-    if moment.startswith("@"):
-        whole, _, fraction = moment[1:].partition(".")
-        at_us = int(whole) * 1000 + int((fraction + "000")[:3])
-        return {"kind": "time", "at_us": at_us}
-    thread, _, operation = moment.partition(":")
-    return {"kind": "event", "thread": int(thread), "operation": int(operation)}
+    async def output(self) -> Output:
+        """What the replayed program wrote so far (``Output``)."""
+        return Output.from_api(await self._connection.json("GET", f"{self._path}/output"))

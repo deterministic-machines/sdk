@@ -1,4 +1,4 @@
-"""What the SDK raises. A command's exit code is never one of these."""
+"""What the SDK raises. A program's exit code is never one of these."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ class AuthenticationError(ApiError):
 
 
 class NotFoundError(ApiError):
-    """404: no such sandbox, command, execution or replay, or not the key's user's."""
+    """404: no such sandbox, execution or replay, or not the key's user's."""
 
 
 class ConflictError(ApiError):
@@ -52,16 +52,6 @@ class SandboxFailedError(SandboxEndedError):
         self.sandbox_id = sandbox_id
         self.state = state
         self.reason = state.reason
-
-
-class CommandRefusedError(DvmError):
-    """The sandbox didn't take the command, and why: a script in an image
-    with no shell, a command too long."""
-
-    def __init__(self, number: int, reason: str) -> None:
-        super().__init__(f"command {number} was refused: {reason}")
-        self.number = number
-        self.reason = reason
 
 
 class ReplayEndedError(DvmError):

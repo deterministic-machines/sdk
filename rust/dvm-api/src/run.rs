@@ -4,7 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{CommandNumber, SandboxId, Timestamp};
+use crate::{SandboxId, Timestamp};
 
 /// A run's id, the controller's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -98,10 +98,7 @@ impl Run {
 }
 
 /// Whether a replay was the run it replayed, as far as can be seen from
-/// outside: its exit code, and its output, byte for byte; a sandbox's that
-/// took commands, each command's, in their order. A replay that isn't the
-/// run, where dvm sees it, fails instead (`RunState::Failed`, dvm's
-/// reason).
+/// outside: its exit code, and its output, byte for byte.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
@@ -109,28 +106,18 @@ impl Run {
 pub enum ReplayVerdict {
     /// The same exit code, and the same output.
     Same,
-    /// Another exit code: the run's, or the command's.
     OtherExit {
         recorded: i32,
         replayed: i32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        command: Option<CommandNumber>,
     },
-    /// Another output: the stream it parted in first, and at which byte;
-    /// the run's, or the command's.
+    /// Another output: the stream it parted in first, and at which byte.
     OtherOutput {
         stream: OutputStream,
         at: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        command: Option<CommandNumber>,
     },
-    /// A command that ran in one and not in the other, or ended in one and
-    /// not in the other.
-    OtherCommand { command: CommandNumber },
 }
 
 impl ReplayVerdict {
-    /// Whether the replay was its execution, as far as can be seen.
     pub fn is_same(&self) -> bool {
         matches!(self, Self::Same)
     }
@@ -156,8 +143,8 @@ impl OutputStream {
     }
 }
 
-/// Bytes as a program wrote them, or as it's given them (its stdin, a file
-/// written into its sandbox): base64 in JSON, since they needn't be UTF-8.
+/// Bytes as a program wrote them: base64 in JSON, since they needn't be
+/// UTF-8.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(
@@ -192,14 +179,13 @@ impl<'de> Deserialize<'de> for ByteChunk {
     }
 }
 
-/// What a run's program has written so far, as text: bytes that aren't
-/// UTF-8 are replaced.
+/// What a run's program has written so far, as bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
 pub struct RunOutput {
-    pub stdout: String,
-    pub stderr: String,
+    pub stdout: ByteChunk,
+    pub stderr: ByteChunk,
 }
 
 /// Where a run is:

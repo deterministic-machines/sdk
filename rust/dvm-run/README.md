@@ -14,46 +14,35 @@ prints wherever you like. Where no one is there to approve one, such as CI,
 make a key on [dvm.run's API keys page](https://sandbox.dvm.run/keys) and
 set `DVM_API_KEY`.
 
-A sandbox is a VM made from an image: your agent sends it commands and
-files until it stops it. Everything it ran is its execution, which
-replays, the same, once it ends.
+A sandbox is one recorded run of one program: the image's own command, or
+the command and entrypoint you give as you make it. It ends when the program
+exits. Its execution replays, the same, once the program exited.
 
 ```rust
-use std::time::Duration;
-
 let client = dvm_run::Client::from_env()?;
-let sbx = client.create_sandbox("python:3.12").seed(7).await?;
-sbx.files().write("/app/main.py", "print(1 + 1)\n").await?;
-let r = sbx
-    .commands()
-    .run("python main.py")
-    .cwd("/app")
-    .timeout(Duration::from_secs(60))
-    .await?;
-println!("{} {}", r.stdout, r.exit_code);
-
-let server = sbx.commands().spawn(["python", "-m", "http.server"]).await?;
-server.kill().await?;
-server.wait().await?;
-sbx.stop().await?;
-
-let verdict = client.execution(sbx.id()).await?.replay().await?.wait().await?;
-assert!(verdict.is_same());
+let sandbox = client.create_sandbox("python:3.12")
+    .command(["python", "-c", "print(1 + 1)"]).seed(7).await?;
+println!("{}", sandbox.wait().await?);
+println!("{:?}", sandbox.output().await?.stdout.bytes());
+let mut replay = client.execution(sandbox.id()).await?.replay().await?;
+assert!(replay.wait().await?.is_same());
+println!("{:?}", replay.output().await?.stdout.bytes());
 ```
 
-`Client::from_env` takes dvm.run's address from `DVM_API_URL`, else
-`https://sandbox.dvm.run`, and its key from `DVM_API_KEY`, else the one
-`dvm-run login` saved for that address; `Client::new` takes both.
-
-- A `&str` runs in the sandbox's shell (`/bin/bash -lc`, or `/bin/sh -c`
-  in an image without bash); an array runs as it is.
-- A command's exit code is never an error. A sandbox that ended is
-  `Error::SandboxEnded` (`Error::SandboxFailed`, with dvm's reason, if it
-  failed) on the next call.
-- `.timeout()` kills the command once it passes; its result says so, with
-  code 137 and signal 9. A `run` dropped before its command exits kills it
-  too; a dropped `wait()` only stops waiting.
-- Dropping a sandbox doesn't stop it: call `stop()`, which returns once its
-  log is in, so its execution replays.
-- The API's types are [`dvm-api`](https://crates.io/crates/dvm-api)'s, as
+- Making a sandbox returns once its program started; one that already
+  exited is fine.
+- The program's exit code is never an error. `wait()` returns `Error::SandboxEnded` for a sandbox
+  that was stopped, and `Error::SandboxFailed`, with dvm's reason, for one
+  that failed.
+- Output is bytes. In dvm a program's stdout and stderr are one stream, in
+  the order it wrote them: `stdout`. `stderr` is what dvm itself said.
+- `pause`, `resume` and `stop` act on a sandbox that is going. A stopped
+  sandbox's log is cut short, and doesn't replay.
+- A replay's verdict is `same`, `other_exit` (both codes) or `other_output`
+  (the stream, and the first byte that differs).
+- Dropping a sandbox leaves it running. `sandbox.scope(async |sandbox| ..)`
+  stops one still going when the scope ends. The API's types are
   `dvm_run::api`.
+- It takes dvm.run's address from `DVM_API_URL`, and its key from
+  `DVM_API_KEY`, else the one `dvm-run login` saved for that address; both
+  may be given in code instead.
