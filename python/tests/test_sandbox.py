@@ -107,6 +107,8 @@ def test_new_methods_refuse_a_sandbox_with_a_command():
                 call()
 
 
+@pytest.mark.skipif(os.environ.get("DVM_TEST_IN_DVM") != "1",
+                    reason="users and the network are dvm's; a stand-in has neither")
 def test_commands_run_as_a_user_and_the_network_changes_as_the_sandbox_runs():
     """The run's resolver is reached over TCP, as the runner's own takes it,
     unless the network is none; link-local addresses never are."""
