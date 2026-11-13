@@ -1,3 +1,4 @@
+mod command_user;
 mod commands;
 mod files;
 mod request_loop;

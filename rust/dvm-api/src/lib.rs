@@ -14,6 +14,7 @@ mod image_reference;
 mod run;
 mod sandbox;
 mod sandbox_input;
+mod sandbox_network;
 mod sandbox_protocol;
 mod timestamp;
 mod user;
@@ -32,6 +33,7 @@ pub use sandbox::{
     SpecField,
 };
 pub use sandbox_input::{OutputAfter, SandboxInput, SandboxInputState};
+pub use sandbox_network::SandboxNetwork;
 pub use sandbox_protocol::{
     SandboxAnswer, SandboxAnswerKind, SandboxExited, SandboxProgram, SandboxRead, SandboxRequest,
     SandboxRequestAction, SandboxRun, SandboxStarted, SandboxStdin, SandboxWrite,
@@ -81,6 +83,7 @@ pub fn export_typescript(config: &ts_rs::Config) -> Result<(), ts_rs::ExportErro
     SandboxAnswer::export_all(config)?;
     SandboxDraft::export_all(config)?;
     SandboxId::export_all(config)?;
+    SandboxNetwork::export_all(config)?;
     SandboxSpec::export_all(config)?;
     SandboxesPage::export_all(config)?;
     Timestamp::export_all(config)?;
@@ -107,7 +110,7 @@ mod typescript_tests {
             assert!(written.contains(declaration), "{declaration}");
         }
         for (name, fields) in [
-            ("SandboxRun", &["env", "cwd", "stdin"][..]),
+            ("SandboxRun", &["env", "cwd", "stdin", "user"][..]),
             ("SandboxStdin", &["data", "close"][..]),
             ("SandboxWrite", &["mode", "last"][..]),
             ("SandboxAnswer", &["id"][..]),

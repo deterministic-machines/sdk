@@ -16,8 +16,9 @@ key on [dvm.run's API keys page](https://sandbox.dvm.run/keys) and set
 
 A sandbox records its process from start to end. With no command or
 entrypoint it runs the sandbox server and takes commands; the image's own
-command does not run. Commands inherit the image's environment, user and
-working directory, with any environment you supply. With a command or
+command does not run. Commands run as root, in the image's environment and
+working directory, with any environment you supply; a command's `user`
+runs it as another of the image's users. With a command or
 entrypoint it is one run of that program, and the new command and file
 methods fail locally without sending a request.
 
@@ -40,10 +41,24 @@ let id: number;
 console.assert((await (await (await Execution.get(id)).replay()).wait()).same);
 ```
 
-`run(command, { env, cwd, stdin }?)` takes argv (a string array) or a shell
-script (a string), optional environment and working directory, and stdin
-as `Uint8Array`. It sends stdin and closes it, then returns `CommandResult`:
-`exitCode`, `stdout`, and `stderr`, with both streams as `Uint8Array`.
+`run(command, { env, cwd, stdin, user }?)` takes argv (a string array) or a
+shell script (a string), optional environment, working directory and user,
+and stdin as `Uint8Array`. It sends stdin and closes it, then returns
+`CommandResult`: `exitCode`, `stdout`, and `stderr`, with both streams as
+`Uint8Array`.
+
+`user` is named as `docker exec --user` names one: a name or uid, optionally
+`:group` or `:gid`, looked up in the image's `/etc/passwd` and `/etc/group`.
+`HOME` and `USER` are that user's unless you supply them. An unknown user
+exits 126 with the reason on stderr.
+
+A sandbox reaches the internet unless made otherwise: `{ network: "none" }`
+reaches nothing, not even a resolver, and `{ allow: ["pypi.org",
+"*.github.com", "8.8.8.0/24"] }` makes an allowlist: the resolver, the
+internet addresses it gives those names, and those addresses. It never
+reaches its runner, the runner's LAN, or link-local addresses.
+`setNetwork(network, allow?)` changes it while the sandbox runs; open
+connections stay. A refused connection fails with "Network unreachable".
 
 `start` takes the same arguments and returns `Command` once started.
 `wait()` gives its result; `signal(number)` signals its process group.

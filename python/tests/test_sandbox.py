@@ -105,3 +105,24 @@ def test_new_methods_refuse_a_sandbox_with_a_command():
                      lambda: sandbox.read_file("/tmp/a"), sandbox.end):
             with pytest.raises(DvmError, match="supplied program"):
                 call()
+
+
+def test_commands_run_as_a_user_and_the_network_changes_as_the_sandbox_runs():
+    """The run's resolver is reached over TCP, as the runner's own takes it,
+    unless the network is none; link-local addresses never are."""
+    resolver = "nc 172.17.0.1 53 </dev/null"
+    with Sandbox.create(IMAGE) as sandbox:
+        assert sandbox.run("id -u").stdout == b"0\n"
+        assert sandbox.run("id -u; echo $HOME", user="nobody").stdout == b"65534\n/\n"
+        assert sandbox.run(resolver).exit_code == 0
+        sandbox.set_network("none")
+        assert sandbox.run(resolver).exit_code != 0
+        sandbox.set_network("allowlist", ["pypi.org"])
+        assert sandbox.run(resolver).exit_code == 0
+        with pytest.raises(InvalidRequestError):
+            sandbox.set_network("allowlist", ["169.254.169.254"])
+        metadata = sandbox.run("wget -q -T 5 -O - http://169.254.169.254/ 2>&1")
+        assert b"unreachable" in metadata.stdout
+        execution = Execution.get(sandbox.id)
+        assert execution.spec["network"] == {"mode": "allowlist", "allow": ["pypi.org"]}
+        execution.close()

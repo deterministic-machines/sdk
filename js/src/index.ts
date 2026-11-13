@@ -6,6 +6,6 @@ export {
 } from "./errors.ts";
 export { Execution, type ExecutionSpec, type Output, Replay, Verdict } from "./execution.ts";
 export { type RunKind, RunState } from "./run-state.ts";
-export { Sandbox, type SandboxOptions } from "./sandbox.ts";
+export { type NetworkMode, Sandbox, type SandboxOptions } from "./sandbox.ts";
 
 export { Command, type CommandOptions, type CommandResult, type WriteFileOptions } from "./sandbox-session.ts";

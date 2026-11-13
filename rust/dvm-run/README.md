@@ -16,8 +16,9 @@ set `DVM_API_KEY`.
 
 A sandbox records its process from start to end. With no command or
 entrypoint it runs the sandbox server and takes commands; the image's own
-command does not run. Commands inherit the image's environment, user and
-working directory, with any environment you supply. With a command or
+command does not run. Commands run as root, in the image's environment and
+working directory, with any environment you supply; a command's `user`
+runs it as another of the image's users. With a command or
 entrypoint it is one run of that program, and the new command and file
 methods fail locally without sending a request.
 
@@ -41,9 +42,23 @@ assert!(replay.wait().await?.is_same());
 
 `run(command)` takes argv (an array or vector of strings), or a shell
 script (`&str` or `String`). Before awaiting, its builder accepts
-`.env(name, value)`, `.cwd(path)`, and `.stdin(bytes)`. It sends stdin and
-closes it, then returns `CommandResult` with `exit_code`, `stdout: Vec<u8>`,
-and `stderr: Vec<u8>`. Omitted stdin is empty and closed.
+`.env(name, value)`, `.cwd(path)`, `.user(user)`, and `.stdin(bytes)`. It
+sends stdin and closes it, then returns `CommandResult` with `exit_code`,
+`stdout: Vec<u8>`, and `stderr: Vec<u8>`. Omitted stdin is empty and closed.
+
+`user` is named as `docker exec --user` names one: a name or uid, optionally
+`:group` or `:gid`, looked up in the image's `/etc/passwd` and `/etc/group`.
+`HOME` and `USER` are that user's unless you supply them. An unknown user
+exits 126 with the reason on stderr.
+
+A sandbox reaches the internet unless made otherwise:
+`.network(SandboxNetwork::None)` reaches nothing, not even a resolver, and
+`SandboxNetwork::Allowlist { allow }` (names, `*.<domain>`, IPv4 addresses
+and networks) the resolver, the internet addresses it gives those names,
+and those addresses. It never reaches its runner, the runner's LAN, or
+link-local addresses. `set_network(&network)` changes it while the sandbox
+runs; open connections stay. A refused connection fails with "Network
+unreachable".
 
 `start` takes the same command and builder options and returns `Command`
 once started. Its `wait()` gives the result; `signal(number)` signals the

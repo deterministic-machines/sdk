@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Sequence
 from typing import Any, Coroutine, Mapping, Optional, TypeVar
 
 from dvm.execution import AsyncExecution, AsyncReplay, Output, Verdict
@@ -70,6 +71,8 @@ class Sandbox:
         seed: Optional[int] = None,
         env: Optional[Mapping[str, str]] = None,
         name: Optional[str] = None,
+        network: Optional[str] = None,
+        allow: Optional[Sequence[str]] = None,
         api_key: Optional[str] = None,
         api_url: Optional[str] = None,
     ) -> Sandbox:
@@ -85,6 +88,8 @@ class Sandbox:
                     seed=seed,
                     env=env,
                     name=name,
+                    network=network,
+                    allow=allow,
                     api_key=api_key,
                     api_url=api_url,
                 )
@@ -107,6 +112,10 @@ class Sandbox:
     def pause(self) -> None:
         _run(self._sandbox.pause())
 
+    def set_network(self, network: str, allow: Optional[Sequence[str]] = None) -> None:
+        """:meth:`AsyncSandbox.set_network`."""
+        _run(self._sandbox.set_network(network, allow))
+
     def resume(self) -> None:
         _run(self._sandbox.resume())
 
@@ -120,16 +129,20 @@ class Sandbox:
     def run(
         self, command: list[str] | str, *, env: Optional[Mapping[str, str]] = None,
         cwd: Optional[str] = None, stdin: Optional[bytes] = None,
+        user: Optional[str] = None,
     ) -> CommandResult:
         """Runs argv or a script to its end, with stdin sent then closed."""
-        return _run(self._sandbox.run(command, env=env, cwd=cwd, stdin=stdin))
+        return _run(self._sandbox.run(command, env=env, cwd=cwd, stdin=stdin, user=user))
 
     def start(
         self, command: list[str] | str, *, env: Optional[Mapping[str, str]] = None,
         cwd: Optional[str] = None, stdin: Optional[bytes] = None,
+        user: Optional[str] = None,
     ) -> Command:
         """Starts a command; omitted stdin stays open for the handle."""
-        return Command(_run(self._sandbox.start(command, env=env, cwd=cwd, stdin=stdin)))
+        return Command(_run(
+            self._sandbox.start(command, env=env, cwd=cwd, stdin=stdin, user=user)
+        ))
 
     def write_file(self, path: str, data: bytes, *, mode: Optional[int] = None) -> None:
         _run(self._sandbox.write_file(path, data, mode=mode))

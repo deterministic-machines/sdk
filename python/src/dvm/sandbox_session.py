@@ -113,7 +113,7 @@ class SandboxSession:
 
     async def start(
         self, command: list[str] | str, *, env: Optional[Mapping[str, str]],
-        cwd: Optional[str], stdin: Optional[bytes],
+        cwd: Optional[str], stdin: Optional[bytes], user: Optional[str] = None,
     ) -> AsyncCommand:
         run: dict[str, Any] = {
             "script" if isinstance(command, str) else "argv": command,
@@ -123,6 +123,8 @@ class SandboxSession:
             run["env"] = dict(env)
         if cwd is not None:
             run["cwd"] = cwd
+        if user is not None:
+            run["user"] = user
         operation = await self._begin({"run": run})
         await operation.started.wait()
         operation.check()

@@ -65,6 +65,22 @@ neither shell a script gets an error; argv commands can still run.
 {"id":2,"run":{"script":"ls -l | wc -l"}}
 ```
 
+Optional `user` runs the command as another user, named as
+`docker exec --user` names one: a name or uid, optionally `:group` or
+`:gid`. Names are looked up in `/etc/passwd` and `/etc/group`, read as
+files at each run, without NSS. A uid not in `/etc/passwd` gets group 0
+and home `/`. The command's groups are its group and every group that
+lists the user by name. `HOME`, and `USER` for a named user, are the
+user's unless `env` sets them. Without `user` the command runs as the
+server's own user. Switching needs the server to run as root (dvm.run
+starts it with `--user 0:0`); otherwise only the server's own user works.
+An unknown user or group, or a failed switch, still starts the command,
+which writes the reason to stderr and exits 126.
+
+```json
+{"id":3,"run":{"argv":["id"],"user":"nobody"}}
+```
+
 The command inherits the server's environment with the additions and
 uses that environment's `PATH` to find its program. With no `PATH` it
 searches `/bin:/usr/bin`. Empty PATH components refer to the command's
@@ -243,7 +259,8 @@ Each dvm process has a 45-second guest time limit and a 60-second host
 wait bound. On failure the test prints captured stdout and stderr. The
 recorded test drives a session interactively on one vCPU, then compares
 replay stdout byte for byte and compares exit status. It checks a group
-member's TERM handler while it waits for a syscall and ends with a
-daemon outside the command's group still alive. The unrecorded
+member's TERM handler while it waits for a syscall, leaves a daemon
+outside the command's group alive, and runs a last command as `nobody`
+from the root server. The unrecorded
 test drives the same session to distinguish kernel failures from replay
 failures. Each mounts a temporary directory containing only the server.
