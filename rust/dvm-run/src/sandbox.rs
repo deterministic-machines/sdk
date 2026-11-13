@@ -2,7 +2,9 @@ use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use dvm_api::{EnvironmentVariable, Run, RunOutput, RunState, SandboxDraft, SandboxId};
+use dvm_api::{
+    EnvironmentVariable, Run, RunOutput, RunState, SandboxDraft, SandboxId, SandboxNetwork,
+};
 use reqwest::Method;
 
 use crate::client::Client;
@@ -70,6 +72,12 @@ impl SandboxBuilder {
     /// The seed of everything random in it, so a run is the same each time.
     pub fn seed(mut self, seed: u64) -> Self {
         self.draft.seed = seed;
+        self
+    }
+
+    /// Where its connections out may go: [`SandboxNetwork::Public`] unless given.
+    pub fn network(mut self, network: SandboxNetwork) -> Self {
+        self.draft.network = network;
         self
     }
 
@@ -154,6 +162,21 @@ impl Sandbox {
         self.act("resume").await
     }
 
+    /// Where its connections out may go from now on; those open stay.
+    pub async fn set_network(&self, network: &SandboxNetwork) -> Result<()> {
+        let calls = &self.calls;
+        let path = format!("{}/network", calls.path);
+        calls
+            .while_live(calls.client.json::<dvm_api::Sandbox>(
+                Method::PUT,
+                &path,
+                &[],
+                Some(network),
+            ))
+            .await
+            .map(drop)
+    }
+
     /// Stops an active run. Its cut recording cannot replay.
     pub async fn stop(&self) -> Result<()> {
         let calls = &self.calls;
@@ -195,6 +218,7 @@ impl Sandbox {
                 env: Default::default(),
                 cwd: None,
                 stdin: true,
+                user: None,
             },
         }
     }

@@ -211,12 +211,13 @@ async fn split_lines_and_interleaved_commands_use_input_offsets() {
     let first = tokio::spawn(fixture.sandbox.start(["first"]).into_future());
     let (aid, a) = fixture.next().await;
     assert_eq!((aid, a.id), (123, 123));
-    let second = tokio::spawn(fixture.sandbox.start("second").into_future());
+    assert!(matches!(a.action, SandboxRequestAction::Run(run) if run.user.is_none()));
+    let second = tokio::spawn(fixture.sandbox.start("second").user("agent").into_future());
     let (bid, b) = fixture.next().await;
     assert!(bid > aid);
     assert_eq!(b.id, bid);
     assert!(
-        matches!(b.action, SandboxRequestAction::Run(run) if run.program == dvm_run::api::SandboxProgram::Script("second".into()))
+        matches!(b.action, SandboxRequestAction::Run(run) if run.program == dvm_run::api::SandboxProgram::Script("second".into()) && run.user.as_deref() == Some("agent"))
     );
     let answers = lines(&[
         json!({"id": aid, "started": {"pid": 1, "argv": ["first"]}}),

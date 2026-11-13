@@ -89,6 +89,51 @@ fn environment_directory_and_path_are_the_commands() {
     );
 }
 
+/// The test's own user: a server that isn't root can switch only to itself.
+#[test]
+fn a_user_runs_the_command_with_its_ids_and_home() {
+    let uid = unsafe { libc::getuid() };
+    let passwd = std::fs::read_to_string("/etc/passwd").unwrap();
+    let [name, _, _, gid, _, home, ..] = passwd
+        .lines()
+        .map(|line| line.split(':').collect::<Vec<_>>())
+        .find(|fields| fields.get(2) == Some(&uid.to_string().as_str()))
+        .expect("the test's user is in /etc/passwd")[..]
+    else {
+        panic!("a passwd line has its fields")
+    };
+    let show = "printf '%s %s %s %s' \"$(id -u)\" \"$(id -g)\" \"$HOME\" \"$USER\"";
+    let mut server = Session::host();
+    server.send(json!({"id":1,"run":{"argv":["/bin/sh","-c",show],"user":name}}));
+    let answers = server.through_exit(1);
+    ordered(&answers, 0);
+    assert_eq!(
+        output(&answers, "stdout"),
+        format!("{uid} {gid} {home} {name}").as_bytes()
+    );
+    server.send(json!({"id":2,"run":{"argv":["/bin/sh","-c",show],"user":format!("{uid}:{gid}"),"env":{"HOME":"/given"}}}));
+    let answers = server.through_exit(2);
+    ordered(&answers, 0);
+    assert_eq!(
+        output(&answers, "stdout"),
+        format!("{uid} {gid} /given {name}").as_bytes()
+    );
+}
+
+#[test]
+fn an_unknown_user_exits_126_with_the_reason() {
+    let mut server = Session::host();
+    server.send(json!({"id":1,"run":{"argv":["/bin/true"],"user":"no-such-dvm-user"}}));
+    let answers = server.through_exit(1);
+    ordered(&answers, 126);
+    let stderr = String::from_utf8(output(&answers, "stderr")).unwrap();
+    assert!(
+        stderr.contains("unknown user \"no-such-dvm-user\""),
+        "{stderr}"
+    );
+    assert!(output(&answers, "stdout").is_empty());
+}
+
 #[test]
 fn queued_stdin_does_not_hold_up_other_requests() {
     let directory = tempfile::tempdir().unwrap();

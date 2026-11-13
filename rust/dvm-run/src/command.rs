@@ -105,6 +105,12 @@ impl StartBuilder {
         self.run.cwd = Some(path.into());
         self
     }
+    /// As `docker exec --user`: a name or uid, optionally `:group` or `:gid`.
+    /// Omitted, the command runs as the sandbox server's user.
+    pub fn user(mut self, user: impl Into<String>) -> Self {
+        self.run.user = Some(user.into());
+        self
+    }
     /// Sends bytes, then closes stdin. Omitted stdin stays open on a handle.
     pub fn stdin(mut self, data: impl AsRef<[u8]>) -> Self {
         self.stdin = Some(data.as_ref().to_vec());
@@ -135,6 +141,10 @@ impl RunBuilder {
     }
     pub fn cwd(mut self, path: impl Into<String>) -> Self {
         self.0 = self.0.cwd(path);
+        self
+    }
+    pub fn user(mut self, user: impl Into<String>) -> Self {
+        self.0 = self.0.user(user);
         self
     }
     pub fn stdin(mut self, data: impl AsRef<[u8]>) -> Self {

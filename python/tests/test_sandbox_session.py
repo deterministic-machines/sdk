@@ -63,10 +63,12 @@ def test_split_lines_and_interleaved_commands_use_the_input_offsets():
         first = asyncio.create_task(streams.sandbox.start(["first"]))
         first_id, request = await streams.requests.get()
         assert first_id == request["id"] == 123
-        second = asyncio.create_task(streams.sandbox.start("second"))
+        assert "user" not in request["run"]
+        second = asyncio.create_task(streams.sandbox.start("second", user="agent"))
         second_id, request = await streams.requests.get()
         assert second_id == request["id"] > first_id
         assert request["run"]["script"] == "second"
+        assert request["run"]["user"] == "agent"
         answers = (line({"id": first_id, "started": {"pid": 1, "argv": ["first"]}})
                    + line({"id": second_id, "started": {"pid": 2, "argv": ["sh", "-c", "second"]}})
                    + line({"id": first_id, "stdout": "YQ=="}))

@@ -46,6 +46,9 @@ pub struct SandboxRun {
     #[serde(default)]
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
     pub stdin: bool,
+    /// As `docker exec --user`: a name or uid, optionally `:group` or `:gid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

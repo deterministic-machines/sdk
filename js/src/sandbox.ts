@@ -16,6 +16,23 @@ export interface SandboxOptions extends ClientOptions, CallOptions {
   seed?: number;
   env?: Record<string, string>;
   name?: string;
+  /** Where its connections out may go (`setNetwork`): `public` unless given. */
+  network?: NetworkMode;
+  /** An allowlist's entries; alone, they make one. */
+  allow?: string[];
+}
+
+/** `public`: the internet, none of its runner's own or LAN addresses.
+ * `none`: nothing, not even a resolver. `allowlist`: the resolver and each
+ * allowed name (`pypi.org`), subdomains (`*.github.com`), IPv4 address or
+ * network on the internet (`8.8.8.0/24`). */
+export type NetworkMode = "public" | "none" | "allowlist";
+
+function networkOf(network: NetworkMode | undefined, allow: string[] | undefined): Record<string, unknown> {
+  const mode = network ?? "allowlist";
+  if (mode === "allowlist") return { mode, allow: allow ?? [] };
+  if (allow !== undefined) throw new DvmError(`allow is for an allowlist, not the network ${JSON.stringify(mode)}`);
+  return { mode };
 }
 
 export class Sandbox implements AsyncDisposable {
@@ -50,6 +67,9 @@ export class Sandbox implements AsyncDisposable {
     if (options.name !== undefined) draft.name = options.name;
     const env = Object.entries(options.env ?? {});
     if (env.length > 0) draft.environment = env.map(([name, value]) => ({ name, value }));
+    if (options.network !== undefined || options.allow !== undefined) {
+      draft.network = networkOf(options.network, options.allow);
+    }
     const connection = await Connection.open(options);
     const { signal } = options;
     const created = await connection.json<ApiSandbox>("POST", "/sandboxes", { body: draft, signal });
@@ -83,6 +103,13 @@ export class Sandbox implements AsyncDisposable {
 
   async resume(options: CallOptions = {}): Promise<void> {
     await this.#act("resume", options);
+  }
+
+  /** Where its connections out may go from now on; those open stay. */
+  async setNetwork(network: NetworkMode, allow?: string[], options: CallOptions = {}): Promise<void> {
+    const calls = this.#calls;
+    const body = networkOf(network, allow);
+    await calls.whileLive(() => calls.connection.json("PUT", `${calls.path}/network`, { ...options, body }));
   }
 
   /** Stops an active run. Its cut recording cannot replay. */

@@ -16,8 +16,9 @@ no one is there to approve one, such as CI, make a key on
 
 A sandbox records its process from start to end. With no command or
 entrypoint it runs the sandbox server and takes commands; the image's own
-command does not run. Commands inherit the image's environment, user and
-working directory, with any environment you supply. With a command or
+command does not run. Commands run as root, in the image's environment and
+working directory, with any environment you supply; a command's `user`
+runs it as another of the image's users. With a command or
 entrypoint it is one run of that program, and command and file methods
 raise `DvmError` without sending a request.
 
@@ -35,12 +36,26 @@ with Sandbox.create("python:3.12") as sandbox:
 assert Execution.get(sandbox.id).replay().wait().same
 ```
 
-`run(command, *, env=None, cwd=None, stdin=None)` runs argv (a list) or a
-shell script (a string) to its end. It sends stdin bytes, then closes stdin;
-without bytes, stdin is empty. Its `CommandResult` has `exit_code`, `stdout`
-and `stderr`, the last two as bytes. A nonzero code is a result, not an
-error. A killing signal is reported as `128 + signal`; the protocol does
-not distinguish that from a program explicitly exiting with that code.
+`run(command, *, env=None, cwd=None, stdin=None, user=None)` runs argv (a
+list) or a shell script (a string) to its end. It sends stdin bytes, then
+closes stdin; without bytes, stdin is empty. Its `CommandResult` has
+`exit_code`, `stdout` and `stderr`, the last two as bytes. A nonzero code is
+a result, not an error. A killing signal is reported as `128 + signal`; the
+protocol does not distinguish that from a program explicitly exiting with
+that code.
+
+`user` is named as `docker exec --user` names one: a name or uid, optionally
+`:group` or `:gid`, looked up in the image's `/etc/passwd` and `/etc/group`.
+`HOME` and `USER` are that user's unless you supply them. An unknown user
+exits 126 with the reason on stderr.
+
+A sandbox reaches the internet unless made otherwise: `network="none"`
+reaches nothing, not even a resolver, and `allow=["pypi.org",
+"*.github.com", "8.8.8.0/24"]` makes an allowlist: the resolver, the
+internet addresses it gives those names, and those addresses. It never
+reaches its runner, the runner's LAN, or link-local addresses.
+`set_network(network, allow=None)` changes it while the sandbox runs; open
+connections stay. A refused connection fails with "Network unreachable".
 
 `start` takes the same arguments and returns a `Command` once started.
 `wait()` gives its result; `signal(number)` signals its process group.

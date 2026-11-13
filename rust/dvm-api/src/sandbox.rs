@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Capacity, ImageReference, Run, RunId, RunState};
+use crate::{Capacity, ImageReference, Run, RunId, RunState, SandboxNetwork};
 
 /// A sandbox's id: its run's, as its runner and its output know it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -161,6 +161,8 @@ pub struct SandboxDraft {
     pub cpus: u32,
     pub memory_mib: u32,
     pub seed: u64,
+    /// Where its connections out may go: the internet unless given.
+    pub network: SandboxNetwork,
 }
 
 impl Default for SandboxDraft {
@@ -175,6 +177,7 @@ impl Default for SandboxDraft {
             cpus: 1,
             memory_mib: 1024,
             seed: 0,
+            network: SandboxNetwork::default(),
         }
     }
 }
@@ -196,6 +199,7 @@ pub struct SandboxSpec {
     cpus: u32,
     memory_mib: u32,
     seed: u64,
+    network: SandboxNetwork,
 }
 
 impl SandboxSpec {
@@ -249,6 +253,18 @@ impl SandboxSpec {
 
     pub fn seed(&self) -> u64 {
         self.seed
+    }
+
+    pub fn network(&self) -> &SandboxNetwork {
+        &self.network
+    }
+
+    /// The same spec, with the network its sandbox has now.
+    pub fn with_network(self, network: SandboxNetwork) -> Result<Self, SpecError> {
+        network
+            .check()
+            .map_err(|problem| SpecError::new(SpecField::Network, problem))?;
+        Ok(Self { network, ..self })
     }
 
     /// What a run of the spec takes from its runner: a host CPU for each
@@ -354,6 +370,10 @@ impl TryFrom<SandboxDraft> for SandboxSpec {
         Self::check_range(SpecField::Cpus, draft.cpus, Self::CPUS)?;
         Self::check_range(SpecField::Memory, draft.memory_mib, Self::MEMORY_MIB)?;
         Self::check_range(SpecField::Seed, draft.seed, Self::SEEDS)?;
+        draft
+            .network
+            .check()
+            .map_err(|problem| SpecError::new(SpecField::Network, problem))?;
         Ok(Self {
             name,
             image,
@@ -363,6 +383,7 @@ impl TryFrom<SandboxDraft> for SandboxSpec {
             cpus: draft.cpus,
             memory_mib: draft.memory_mib,
             seed: draft.seed,
+            network: draft.network,
         })
     }
 }
@@ -378,6 +399,7 @@ impl From<SandboxSpec> for SandboxDraft {
             cpus: spec.cpus,
             memory_mib: spec.memory_mib,
             seed: spec.seed,
+            network: spec.network,
         }
     }
 }
@@ -418,6 +440,7 @@ pub enum SpecField {
     Cpus,
     Memory,
     Seed,
+    Network,
 }
 
 impl fmt::Display for SpecField {
@@ -431,6 +454,7 @@ impl fmt::Display for SpecField {
             Self::Cpus => "cpus",
             Self::Memory => "memory",
             Self::Seed => "seed",
+            Self::Network => "network",
         })
     }
 }
@@ -501,6 +525,12 @@ mod tests {
 
     #[test]
     fn each_field_is_checked() {
+        let network = |d: &mut SandboxDraft| {
+            d.network = SandboxNetwork::Allowlist {
+                allow: vec!["::1".into()],
+            }
+        };
+        assert_eq!(refused_field(network), SpecField::Network);
         assert_eq!(refused_field(|d| d.name = "Hello".into()), SpecField::Name);
         assert_eq!(refused_field(|d| d.name = "-a".into()), SpecField::Name);
         assert_eq!(refused_field(|d| d.name = "a".repeat(64)), SpecField::Name);

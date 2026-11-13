@@ -3,6 +3,7 @@ supplied program. Its execution replays once its process exited."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Awaitable, Mapping, Optional, TypeVar
 
 from dvm.connection import Connection
@@ -46,6 +47,8 @@ class AsyncSandbox:
         seed: Optional[int] = None,
         env: Optional[Mapping[str, str]] = None,
         name: Optional[str] = None,
+        network: Optional[str] = None,
+        allow: Optional[Sequence[str]] = None,
         api_key: Optional[str] = None,
         api_url: Optional[str] = None,
     ) -> AsyncSandbox:
@@ -53,7 +56,9 @@ class AsyncSandbox:
         process started. Without command or entrypoint it runs the sandbox
         server and takes commands; the image's own program does not run.
         Defaults: 1 vCPU, 1024 MiB, seed 0, the image's environment, user
-        and directory, and a name from the image."""
+        and directory, and a name from the image. ``network`` is where its
+        connections out may go (:meth:`set_network`): ``public`` unless
+        given."""
         draft: dict[str, Any] = {"image": image}
         given = {
             "command": command,
@@ -66,6 +71,8 @@ class AsyncSandbox:
         draft.update({field: value for field, value in given.items() if value is not None})
         if env:
             draft["environment"] = [{"name": key, "value": value} for key, value in env.items()]
+        if network is not None or allow is not None:
+            draft["network"] = _network(network, allow)
         connection = Connection(api_key, api_url)
         try:
             created = await connection.json("POST", "/sandboxes", body=draft)
@@ -103,6 +110,16 @@ class AsyncSandbox:
     async def resume(self) -> None:
         await self._while_live(self._connection.json("POST", f"{self._path}/resume"))
 
+    async def set_network(self, network: str, allow: Optional[Sequence[str]] = None) -> None:
+        """Where its connections out may go from now on; those open stay.
+        ``public``: the internet, none of its runner's own or LAN addresses.
+        ``none``: nothing, not even a resolver. ``allowlist``: the resolver
+        and each of ``allow``, a name (``pypi.org``), its subdomains
+        (``*.github.com``), an IPv4 address or network (``8.8.8.0/24``) on the
+        internet: never its runner, the runner's LAN, or link-local addresses."""
+        body = _network(network, allow)
+        await self._while_live(self._connection.json("PUT", f"{self._path}/network", body=body))
+
     async def stop(self) -> None:
         """Stops it. A stopped sandbox's log is cut short, and doesn't
         replay. One that already ended stays as it is."""
@@ -129,23 +146,29 @@ class AsyncSandbox:
     async def run(
         self, command: list[str] | str, *, env: Optional[Mapping[str, str]] = None,
         cwd: Optional[str] = None, stdin: Optional[bytes] = None,
+        user: Optional[str] = None,
     ) -> CommandResult:
         """Runs argv, or a shell script, to its end. Stdin bytes are sent
         then closed; omitted stdin is empty. Nonzero codes are results.
         """
         handle = await self.start(
-            command, env=env, cwd=cwd, stdin=b"" if stdin is None else stdin,
+            command, env=env, cwd=cwd, stdin=b"" if stdin is None else stdin, user=user,
         )
         return await handle.wait()
 
     async def start(
         self, command: list[str] | str, *, env: Optional[Mapping[str, str]] = None,
         cwd: Optional[str] = None, stdin: Optional[bytes] = None,
+        user: Optional[str] = None,
     ) -> AsyncCommand:
         """Starts argv or a shell script and returns its handle. Supplied
         stdin bytes are sent then closed; otherwise the handle owns stdin.
+        A user, as `docker exec --user` names one ("name", "uid", "name:group"),
+        runs it as that user; omitted, it runs as the sandbox server's user.
         """
-        return await self._command_session().start(command, env=env, cwd=cwd, stdin=stdin)
+        return await self._command_session().start(
+            command, env=env, cwd=cwd, stdin=stdin, user=user,
+        )
 
     async def write_file(self, path: str, data: bytes, *, mode: Optional[int] = None) -> None:
         """Writes a whole file in pieces; mode defaults to 0o644, subject
@@ -232,3 +255,13 @@ def _ended_error(sandbox_id: int, state: RunState) -> SandboxEndedError:
     if state.kind == "failed":
         return SandboxFailedError(sandbox_id, state)
     return SandboxEndedError(sandbox_id, state)
+
+
+def _network(network: Optional[str], allow: Optional[Sequence[str]]) -> dict[str, Any]:
+    """The API's network: ``allow`` alone makes an allowlist."""
+    mode = network if network is not None else "allowlist"
+    if mode == "allowlist":
+        return {"mode": mode, "allow": list(allow or [])}
+    if allow is not None:
+        raise ValueError(f"allow is for an allowlist, not the network {mode!r}")
+    return {"mode": mode}

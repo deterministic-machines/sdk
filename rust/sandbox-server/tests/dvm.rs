@@ -99,6 +99,13 @@ fn exercise(server: &mut Session) {
         "env":{"GATE":"/tmp/daemon"}
     }}));
     ordered(&server.through_exit(9), 0);
+    server.send(json!({"id":10,"run":{
+        "argv":["/bin/sh","-c","printf '%s %s %s %s' \"$(id -u)\" \"$(id -g)\" \"$(id -G)\" \"$HOME\""],
+        "user":"nobody"
+    }}));
+    let answers = server.through_exit(10);
+    ordered(&answers, 0);
+    assert_eq!(output(&answers, "stdout"), b"65534 65534 65534 /");
 }
 
 fn run(record: bool) {

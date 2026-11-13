@@ -4,7 +4,7 @@ import { Connection } from "../src/connection.ts";
 import { DvmError, SandboxEndedError, SandboxFailedError } from "../src/errors.ts";
 import { Sandbox } from "../src/sandbox.ts";
 
-type RequestLine = { id: number; run?: { script?: string }; stdin?: { data?: string; close?: boolean };
+type RequestLine = { id: number; run?: { script?: string; user?: string }; stdin?: { data?: string; close?: boolean };
   write?: { path: string; mode: number; data: string; last: boolean }; read?: { path: string } };
 type State = { kind: "running" | "exited" | "failed" | "stopped"; code?: number; reason?: string };
 class Mailbox<T> {
@@ -86,10 +86,11 @@ test("split lines and interleaved commands use input offsets", async () => {
   const streams = new Streams(123);
   const first = streams.sandbox.start(["first"]);
   const [aid, aRequest] = await streams.requests.next();
-  assert.equal(aid, 123); assert.equal(aRequest.id, aid);
-  const second = streams.sandbox.start("second");
+  assert.equal(aid, 123); assert.equal(aRequest.id, aid); assert.ok(!("user" in aRequest.run!));
+  const second = streams.sandbox.start("second", { user: "agent" });
   const [bid, bRequest] = await streams.requests.next();
   assert.ok(bid > aid); assert.equal(bRequest.id, bid); assert.equal(bRequest.run?.script, "second");
+  assert.equal(bRequest.run?.user, "agent");
   const answers = Buffer.concat([line({ id: aid, started: { pid: 1, argv: ["first"] } }),
     line({ id: bid, started: { pid: 2, argv: ["sh", "-c", "second"] } }), line({ id: aid, stdout: "YQ==" })]);
   streams.chunks.put([answers.subarray(0, -4), true]);

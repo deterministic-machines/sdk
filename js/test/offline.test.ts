@@ -61,3 +61,17 @@ test("a key is needed", async () => {
     await assert.rejects(Connection.open({ apiUrl: "http://dvm.test" }), DvmError);
   });
 });
+
+test("setNetwork puts the mode and an allowlist's entries", async () => {
+  const bodies: unknown[] = [];
+  const sandbox = sandboxAnswering(async (request) => {
+    assert.equal(request.method, "PUT");
+    assert.equal(new URL(request.url).pathname, "/api/sandboxes/5/network");
+    bodies.push(await request.json());
+    return Response.json({ id: 5, spec: { name: "test" } });
+  });
+  await sandbox.setNetwork("none");
+  await sandbox.setNetwork("allowlist", ["pypi.org", "8.8.8.0/24"]);
+  assert.deepEqual(bodies, [{ mode: "none" }, { mode: "allowlist", allow: ["pypi.org", "8.8.8.0/24"] }]);
+  await assert.rejects(sandbox.setNetwork("public", ["pypi.org"]), DvmError);
+});

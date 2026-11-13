@@ -14,6 +14,8 @@ export interface CommandOptions extends CallOptions {
   env?: Record<string, string>;
   cwd?: string;
   stdin?: Uint8Array;
+  /** As `docker exec --user`: "name", "uid", "name:group". Omitted, the sandbox server's user. */
+  user?: string;
 }
 
 export interface WriteFileOptions extends CallOptions {
@@ -22,7 +24,7 @@ export interface WriteFileOptions extends CallOptions {
 
 // This package does not carry dvm-api's TypeScript export.
 type RequestAction =
-  | { run: ({ argv: string[] } | { script: string }) & { env?: Record<string, string>; cwd?: string; stdin: boolean } }
+  | { run: ({ argv: string[] } | { script: string }) & { env?: Record<string, string>; cwd?: string; stdin: boolean; user?: string } }
   | { stdin: { data?: string; close?: boolean } }
   | { signal: number }
   | { write: { path: string; data: string; mode?: number; last: boolean } }
@@ -123,7 +125,7 @@ export class SandboxSession {
 
   async start(command: string[] | string, options: CommandOptions): Promise<Command> {
     const program = typeof command === "string" ? { script: command } : { argv: command };
-    const operation = await this.#begin({ run: { ...program, env: options.env, cwd: options.cwd, stdin: true } }, options);
+    const operation = await this.#begin({ run: { ...program, env: options.env, cwd: options.cwd, stdin: true, user: options.user } }, options);
     await operation.until(() => operation.started, options.signal);
     const handle = new Command(this, operation);
     if (options.stdin !== undefined) {

@@ -1,6 +1,7 @@
 """Lifecycle and byte output against fixed HTTP answers."""
 import asyncio
 import base64
+import json
 
 import httpx
 import pytest
@@ -61,3 +62,17 @@ def test_a_key_is_needed(monkeypatch):
     monkeypatch.delenv("DVM_API_KEY", raising=False)
     with pytest.raises(DvmError, match="DVM_API_KEY"):
         Connection(api_url="http://missing.test")
+
+
+def test_set_network_puts_the_mode_and_an_allowlists_entries():
+    bodies = []
+    def answer(request):
+        assert (request.method, request.url.path) == ("PUT", "/api/sandboxes/5/network")
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": 5, "spec": {"name": "test"}})
+    sandbox = sandbox_answered_by(answer)
+    asyncio.run(sandbox.set_network("none"))
+    asyncio.run(sandbox.set_network("allowlist", ["pypi.org", "8.8.8.0/24"]))
+    assert bodies == [{"mode": "none"}, {"mode": "allowlist", "allow": ["pypi.org", "8.8.8.0/24"]}]
+    with pytest.raises(ValueError):
+        asyncio.run(sandbox.set_network("public", ["pypi.org"]))

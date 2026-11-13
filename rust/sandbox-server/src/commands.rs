@@ -9,6 +9,7 @@ use dvm_api::{
     SandboxStdin,
 };
 
+use crate::command_user::CommandUser;
 use crate::request_loop::{Answers, Poller, descriptor, nonblocking};
 
 pub struct Commands {
@@ -31,6 +32,9 @@ struct Execution {
     environment: Vec<CString>,
     candidates: Vec<CString>,
     cwd: Option<CString>,
+    /// An unresolvable user still starts the command, which then exits 126
+    /// with the reason on stderr, as an unrunnable program does.
+    user: Option<Result<CommandUser, String>>,
     last_fd: i32,
 }
 
@@ -84,7 +88,8 @@ impl Commands {
                     None,
                 )
             };
-            let execution = Execution::prepare(&argv, run.env, run.cwd)?;
+            let user = run.user.as_deref().map(CommandUser::of_image);
+            let execution = Execution::prepare(&argv, run.env, run.cwd, user)?;
             nonblocking(stdout.as_raw_fd())?;
             nonblocking(stderr.as_raw_fd())?;
             if let Some(stdin) = &stdin {
@@ -340,8 +345,15 @@ impl Execution {
         argv: &[String],
         additions: BTreeMap<String, String>,
         cwd: Option<String>,
+        user: Option<Result<CommandUser, String>>,
     ) -> io::Result<Self> {
         let mut environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        if let Some(Ok(user)) = &user {
+            environment.insert("HOME".into(), user.home().into());
+            if let Some(name) = user.name() {
+                environment.insert("USER".into(), name.into());
+            }
+        }
         for (name, value) in additions {
             if name.is_empty() || name.contains('=') {
                 return Err(io::Error::new(
@@ -401,6 +413,7 @@ impl Execution {
             environment,
             candidates,
             cwd: cwd.map(CString::new).transpose()?,
+            user,
             last_fd,
         })
     }
@@ -432,6 +445,15 @@ impl Execution {
             if libc::syscall(libc::SYS_rt_sigprocmask, libc::SIG_SETMASK, &mask, 0, 8) < 0 {
                 self.fail("sigprocmask", io::Error::last_os_error(), 126);
             }
+        }
+        match &self.user {
+            None => {}
+            Some(Ok(user)) => {
+                if let Err(error) = user.switch() {
+                    self.fail("user", error, 126);
+                }
+            }
+            Some(Err(reason)) => self.fail("user", reason, 126),
         }
         if let Some(cwd) = &self.cwd
             && unsafe { libc::chdir(cwd.as_ptr()) } < 0
@@ -468,7 +490,7 @@ impl Execution {
         );
     }
 
-    fn fail(&self, operation: &str, error: io::Error, code: i32) -> ! {
+    fn fail(&self, operation: &str, error: impl std::fmt::Display, code: i32) -> ! {
         let message = format!("{}: {operation}: {error}\n", self.argv[0].to_string_lossy());
         let mut bytes = message.as_bytes();
         while !bytes.is_empty() {
