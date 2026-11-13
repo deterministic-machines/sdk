@@ -37,12 +37,6 @@ test("entrypoint and environment", platform, async () => {
   });
 });
 
-test("an image runs its own command", platform, async () => {
-  await withSandbox(Sandbox.create(IMAGE), async (sandbox) => {
-    assert.equal(await sandbox.wait(), 0);
-  });
-});
-
 test("pause resume connect and stop", platform, async () => {
   const command = ["sh", "-c", "while :; do :; done"];
   await withSandbox(Sandbox.create(IMAGE, { command, name: "stopped" }), async (sandbox) => {
@@ -61,4 +55,44 @@ test("pause resume connect and stop", platform, async () => {
 test("refusals are typed", platform, async () => {
   await assert.rejects(Sandbox.create("Not An Image"), InvalidRequestError);
   await assert.rejects(Sandbox.create(IMAGE, { apiKey: "dvm_not-a-key" }), AuthenticationError);
+});
+
+test("a command session ends with a whole recording", platform, async () => {
+  const path = `/tmp/dvm-js-${crypto.randomUUID()}`;
+  let id = 0;
+  await withSandbox(Sandbox.create(IMAGE, { env: { A: "inherited" } }), async (sandbox) => {
+    id = sandbox.id;
+    const result = await sandbox.run(["sh", "-c", "printf '%s ' \"$A\"; pwd; printf err >&2"],
+      { env: { A: "command" }, cwd: "/tmp" });
+    assert.deepEqual(result, { exitCode: 0, stdout: new TextEncoder().encode("command /tmp\n"), stderr: new TextEncoder().encode("err") });
+    assert.equal((await sandbox.run("exit 3")).exitCode, 3);
+    assert.equal(new TextDecoder().decode((await sandbox.run('printf "%s" "$A"')).stdout), "inherited");
+    const stdin = new Uint8Array([104, 105, 0, 255, 10]);
+    assert.deepEqual((await sandbox.run(["cat"], { stdin })).stdout, stdin);
+    const data = Uint8Array.from({ length: 102400 }, (_, i) => i % 256);
+    await sandbox.writeFile(path, data, { mode: 0o600 });
+    assert.deepEqual(await sandbox.readFile(path), data);
+    const server = await sandbox.start(["sh", "-c", "while :; do :; done"]);
+    assert.equal(new TextDecoder().decode((await sandbox.run("printf concurrent")).stdout), "concurrent");
+    await server.signal(15); assert.equal((await server.wait()).exitCode, 143);
+    const cat = await sandbox.start(["cat"]);
+    await cat.writeStdin(new TextEncoder().encode("from the handle")); await cat.closeStdin();
+    assert.equal(new TextDecoder().decode((await cat.wait()).stdout), "from the handle");
+    await sandbox.run(["rm", path]);
+    assert.match(new TextDecoder().decode((await sandbox.output()).stdout), /"started"/);
+    const connected = await Sandbox.connect(id);
+    assert.equal(new TextDecoder().decode((await connected.run("printf connected")).stdout), "connected");
+  });
+  const execution = await Execution.get(id);
+  assert.deepEqual([execution.state.kind, execution.state.exitCode], ["exited", 0]);
+  if (process.env.DVM_TEST_SESSION_REPLAY === "1") assert.ok((await (await execution.replay()).wait()).same);
+});
+
+test("new methods refuse a sandbox with a command", platform, async () => {
+  await withSandbox(Sandbox.create(IMAGE, { command: ["true"] }), async (sandbox) => {
+    for (const call of [() => sandbox.run("true"), () => sandbox.start("true"),
+      () => sandbox.writeFile("/tmp/a", new Uint8Array([104, 105])), () => sandbox.readFile("/tmp/a"), () => sandbox.end()]) {
+      await assert.rejects(call(), /supplied program/);
+    }
+  });
 });

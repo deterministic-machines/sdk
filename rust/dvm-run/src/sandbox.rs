@@ -1,18 +1,23 @@
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
+use std::sync::Arc;
 
 use dvm_api::{EnvironmentVariable, Run, RunOutput, RunState, SandboxDraft, SandboxId};
 use reqwest::Method;
 
 use crate::client::Client;
+use crate::command::{CommandLine, RunBuilder, StartBuilder, WriteFileBuilder, no_commands};
 use crate::error::{Error, Result};
+use crate::sandbox_session::Session;
 
 /// A sandbox, from [`Client::create_sandbox`] or [`Client::connect_sandbox`].
-/// It runs until [`Sandbox::stop`]: dropping it doesn't stop it.
+/// With neither command nor entrypoint it takes commands. Otherwise it is
+/// one run of the supplied program. Dropping it does not end or stop it.
 #[derive(Clone, Debug)]
 pub struct Sandbox {
     calls: SandboxCalls,
     name: String,
+    session: Option<Arc<Session>>,
 }
 
 /// What a sandbox is made of: [`Client::create_sandbox`], then what differs
@@ -87,7 +92,7 @@ impl SandboxBuilder {
             .client
             .json(Method::POST, "/sandboxes", &[], Some(&self.draft))
             .await?;
-        let sandbox = Sandbox::new(self.client, created.clone());
+        let sandbox = Sandbox::new(self.client, created.clone(), Some(0));
         // Dropped while it starts, it's stopped: no one holds it.
         let mut stop_on_drop = StopOnDrop(Some(sandbox.calls.clone()));
         sandbox.calls.wait_until_running(created.run).await?;
@@ -106,14 +111,24 @@ impl IntoFuture for SandboxBuilder {
 }
 
 impl Sandbox {
-    pub(crate) fn new(client: Client, sandbox: dvm_api::Sandbox) -> Self {
+    pub(crate) fn new(
+        client: Client,
+        sandbox: dvm_api::Sandbox,
+        input_offset: Option<u64>,
+    ) -> Self {
+        let calls = SandboxCalls {
+            path: format!("/sandboxes/{}", sandbox.id),
+            client,
+            id: sandbox.id,
+        };
+        let session = sandbox
+            .spec
+            .takes_commands()
+            .then(|| Session::new(calls.clone(), input_offset));
         Self {
-            calls: SandboxCalls {
-                path: format!("/sandboxes/{}", sandbox.id),
-                client,
-                id: sandbox.id,
-            },
+            calls,
             name: sandbox.spec.name().to_owned(),
+            session,
         }
     }
 
@@ -162,18 +177,54 @@ impl Sandbox {
 
     /// The program's exit code; stopped and failed runs return their error.
     pub async fn wait(&self) -> Result<i32> {
-        let calls = &self.calls;
-        let mut run = calls.sandbox().await?.run;
-        loop {
-            match run.state {
-                RunState::Exited { code } => return Ok(code),
-                state if !state.is_active() => return Err(Error::ended(self.id(), state)),
-                _ => run = calls.newer_than(&run).await?,
-            }
+        self.calls.wait().await
+    }
+
+    /// Runs argv or a script, with stdin sent then closed, to its end.
+    pub fn run(&self, command: impl Into<CommandLine>) -> RunBuilder {
+        RunBuilder(self.start(command))
+    }
+
+    /// Returns once started. Omitted stdin stays open for the handle.
+    pub fn start(&self, command: impl Into<CommandLine>) -> StartBuilder {
+        StartBuilder {
+            session: self.session.clone(),
+            stdin: None,
+            run: dvm_api::SandboxRun {
+                program: command.into().0,
+                env: Default::default(),
+                cwd: None,
+                stdin: true,
+            },
         }
     }
 
-    /// The program's stdout and stderr so far, as bytes.
+    /// Writes in pieces. Parent directories must exist. A failed write can
+    /// leave a partial file, with no protocol operation to roll it back.
+    pub fn write_file(&self, path: impl Into<String>, data: impl AsRef<[u8]>) -> WriteFileBuilder {
+        WriteFileBuilder {
+            session: self.session.clone(),
+            path: path.into(),
+            data: data.as_ref().to_vec(),
+            mode: None,
+        }
+    }
+
+    pub async fn read_file(&self, path: impl Into<String>) -> Result<Vec<u8>> {
+        self.session
+            .as_ref()
+            .ok_or_else(no_commands)?
+            .read_file(path.into())
+            .await
+    }
+
+    /// Ends a command sandbox's input and waits for exit. Resume it first
+    /// if paused; EOF kills commands still running.
+    pub async fn end(&self) -> Result<i32> {
+        self.session.as_ref().ok_or_else(no_commands)?.end().await
+    }
+
+    /// Raw process output. A command sandbox's stdout is server answer lines.
     pub async fn output(&self) -> Result<RunOutput> {
         let path = format!("/executions/{}/output", self.id());
         self.calls
@@ -182,15 +233,28 @@ impl Sandbox {
             .await
     }
 
-    /// Runs a scope, stopping this sandbox when it returns or is cancelled.
+    /// Ends input and waits at scope end, including cancellation. A paused
+    /// sandbox or a supplied program is stopped instead.
     pub async fn scope<T>(&self, operation: impl AsyncFnOnce(&Self) -> Result<T>) -> Result<T> {
-        let mut stop_on_drop = StopOnDrop(Some(self.calls.clone()));
+        let mut cleanup = FinishScopeOnDrop(Some(self.clone()));
         let result = operation(self).await;
-        let stopped = self.stop().await;
-        stop_on_drop.0 = None;
+        let stopped = self.finish_scope().await;
+        cleanup.0 = None;
         let value = result?;
         stopped?;
         Ok(value)
+    }
+
+    async fn finish_scope(&self) -> Result<()> {
+        let state = self.state().await?;
+        if !state.is_active() {
+            return Ok(());
+        }
+        if self.session.is_some() && state != RunState::Paused {
+            self.end().await.map(drop)
+        } else {
+            self.stop().await
+        }
     }
 
     async fn act(&self, action: &str) -> Result<()> {
@@ -208,6 +272,17 @@ impl Sandbox {
 }
 
 impl SandboxCalls {
+    pub(crate) async fn wait(&self) -> Result<i32> {
+        let mut run = self.sandbox().await?.run;
+        loop {
+            match run.state {
+                RunState::Exited { code } => return Ok(code),
+                state if !state.is_active() => return Err(Error::ended(self.id, state)),
+                _ => run = self.newer_than(&run).await?,
+            }
+        }
+    }
+
     pub(crate) async fn state(&self) -> Result<RunState> {
         Ok(self.sandbox().await?.run.state)
     }
@@ -272,5 +347,17 @@ impl Drop for StopOnDrop {
                 .json::<Run>(Method::POST, &stop, &[], None::<&()>)
                 .await;
         });
+    }
+}
+
+struct FinishScopeOnDrop(Option<Sandbox>);
+impl Drop for FinishScopeOnDrop {
+    fn drop(&mut self) {
+        if let (Some(sandbox), Ok(runtime)) = (self.0.take(), tokio::runtime::Handle::try_current())
+        {
+            runtime.spawn(async move {
+                let _ = sandbox.finish_scope().await;
+            });
+        }
     }
 }

@@ -1,4 +1,4 @@
-//! dvm.run's SDK: one recorded program and its replays.
+//! dvm.run's SDK: recorded command sessions or supplied programs, and their replays.
 //!
 //! ```no_run
 //! # async fn example() -> dvm_run::Result<()> {
@@ -12,11 +12,13 @@
 //! # }
 //! ```
 mod client;
+mod command;
 mod credentials;
 mod error;
 mod execution;
 mod login;
 mod sandbox;
+mod sandbox_session;
 
 pub use client::{Client, DEFAULT_API_URL};
 pub use credentials::{credentials_path, save_key};
@@ -25,3 +27,7 @@ pub use error::{Error, Result};
 pub use execution::{Execution, Replay};
 pub use login::{LoggedIn, login};
 pub use sandbox::{Sandbox, SandboxBuilder};
+
+pub use command::{
+    Command, CommandLine, CommandResult, RunBuilder, StartBuilder, WriteFileBuilder,
+};

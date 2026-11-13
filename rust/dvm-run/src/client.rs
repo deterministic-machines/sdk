@@ -85,7 +85,7 @@ impl Client {
         let sandbox = self
             .json(Method::GET, &format!("/sandboxes/{id}"), &[], None::<&()>)
             .await?;
-        Ok(Sandbox::new(self.clone(), sandbox))
+        Ok(Sandbox::new(self.clone(), sandbox, None))
     }
 
     /// A sandbox's execution: everything it ran, under its id.
