@@ -13,6 +13,7 @@ mod execution;
 mod image_reference;
 mod run;
 mod sandbox;
+mod sandbox_input;
 mod sandbox_protocol;
 mod timestamp;
 mod user;
@@ -30,6 +31,7 @@ pub use sandbox::{
     EnvironmentVariable, Sandbox, SandboxDraft, SandboxId, SandboxSpec, SandboxesPage, SpecError,
     SpecField,
 };
+pub use sandbox_input::{OutputAfter, SandboxInput, SandboxInputState};
 pub use sandbox_protocol::{
     SandboxAnswer, SandboxAnswerKind, SandboxExited, SandboxProgram, SandboxRead, SandboxRequest,
     SandboxRequestAction, SandboxRun, SandboxStarted, SandboxStdin, SandboxWrite,
@@ -70,6 +72,9 @@ pub fn export_typescript(config: &ts_rs::Config) -> Result<(), ts_rs::ExportErro
     RunAction::export_all(config)?;
     RunId::export_all(config)?;
     RunOutput::export_all(config)?;
+    SandboxInput::export_all(config)?;
+    SandboxInputState::export_all(config)?;
+    OutputAfter::export_all(config)?;
     RunState::export_all(config)?;
     Sandbox::export_all(config)?;
     SandboxRequest::export_all(config)?;

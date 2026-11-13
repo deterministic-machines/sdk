@@ -11,6 +11,7 @@ from typing import Any, Coroutine, Mapping, Optional, TypeVar
 from dvm.execution import AsyncExecution, AsyncReplay, Output, Verdict
 from dvm.run_state import RunState
 from dvm.sandbox import AsyncSandbox
+from dvm.sandbox_session import AsyncCommand, CommandResult
 
 T = TypeVar("T")
 
@@ -48,7 +49,9 @@ _run = _EventLoopThread().run
 class Sandbox:
     """A sandbox, from ``Sandbox.create(image)``, or another process's,
     from ``Sandbox.connect(sandbox_id)``. Its ``id`` is its execution's too.
-    As a context manager, it's stopped at the end."""
+    With no command or entrypoint it takes commands, and its context ends
+    input and waits for exit. A paused sandbox or a supplied program is
+    stopped at the end instead."""
 
     def __init__(self, sandbox: AsyncSandbox) -> None:
         self._sandbox = sandbox
@@ -114,7 +117,32 @@ class Sandbox:
     def wait(self) -> int:
         return _run(self._sandbox.wait())
 
+    def run(
+        self, command: list[str] | str, *, env: Optional[Mapping[str, str]] = None,
+        cwd: Optional[str] = None, stdin: Optional[bytes] = None,
+    ) -> CommandResult:
+        """Runs argv or a script to its end, with stdin sent then closed."""
+        return _run(self._sandbox.run(command, env=env, cwd=cwd, stdin=stdin))
+
+    def start(
+        self, command: list[str] | str, *, env: Optional[Mapping[str, str]] = None,
+        cwd: Optional[str] = None, stdin: Optional[bytes] = None,
+    ) -> Command:
+        """Starts a command; omitted stdin stays open for the handle."""
+        return Command(_run(self._sandbox.start(command, env=env, cwd=cwd, stdin=stdin)))
+
+    def write_file(self, path: str, data: bytes, *, mode: Optional[int] = None) -> None:
+        _run(self._sandbox.write_file(path, data, mode=mode))
+
+    def read_file(self, path: str) -> bytes:
+        return _run(self._sandbox.read_file(path))
+
+    def end(self) -> int:
+        """Ends input and waits for a command sandbox's exit code."""
+        return _run(self._sandbox.end())
+
     def output(self) -> Output:
+        """Raw process output: server answer lines for a command sandbox."""
         return _run(self._sandbox.output())
 
     def close(self) -> None:
@@ -125,6 +153,25 @@ class Sandbox:
 
     def __exit__(self, *_: object) -> None:
         _run(self._sandbox.__aexit__())
+
+
+class Command:
+    """A started command, with the same methods as ``AsyncCommand``."""
+
+    def __init__(self, command: AsyncCommand) -> None:
+        self._command = command
+
+    def wait(self) -> CommandResult:
+        return _run(self._command.wait())
+
+    def signal(self, number: int) -> None:
+        _run(self._command.signal(number))
+
+    def write_stdin(self, data: bytes) -> None:
+        _run(self._command.write_stdin(data))
+
+    def close_stdin(self) -> None:
+        _run(self._command.close_stdin())
 
 
 class Execution:

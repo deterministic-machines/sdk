@@ -13,5 +13,6 @@ async fn dvm_run_from_environment() -> ((), Client) {
 
 scenarios::scenarios!(
     dvm_run_from_environment,
+    true,
     #[ignore = "needs dvm.run, or a controller and a runner: DVM_API_URL and DVM_API_KEY"]
 );

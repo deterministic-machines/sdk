@@ -154,7 +154,7 @@ pub struct SandboxDraft {
     pub image: String,
     /// In place of the image's entrypoint.
     pub entrypoint: Option<String>,
-    /// In place of the image's command, unless empty.
+    /// The program to run. With neither command nor entrypoint, takes commands.
     pub command: Vec<String>,
     /// After the image's own.
     pub environment: Vec<EnvironmentVariable>,
@@ -228,6 +228,11 @@ impl SandboxSpec {
 
     pub fn command(&self) -> &[String] {
         &self.command
+    }
+
+    /// Whether the sandbox runs the sandbox server and accepts input bytes.
+    pub fn takes_commands(&self) -> bool {
+        self.command.is_empty() && self.entrypoint.is_none()
     }
 
     pub fn environment(&self) -> &[EnvironmentVariable] {
@@ -433,6 +438,24 @@ impl fmt::Display for SpecField {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_spec_without_a_program_takes_commands() {
+        for (command, entrypoint, takes_commands) in [
+            (vec![], None, true),
+            (vec!["echo".to_owned()], None, false),
+            (vec![], Some("/bin/sh".to_owned()), false),
+            (vec!["hi".to_owned()], Some("/bin/echo".to_owned()), false),
+        ] {
+            let spec = SandboxSpec::try_from(SandboxDraft {
+                command,
+                entrypoint,
+                ..draft()
+            })
+            .unwrap();
+            assert_eq!(spec.takes_commands(), takes_commands);
+        }
+    }
 
     fn draft() -> SandboxDraft {
         SandboxDraft {

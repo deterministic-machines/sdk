@@ -1,27 +1,38 @@
-"""A sandbox: one recorded run of one program, the image's own or the one
-given as it's made. Its execution replays once the program exited."""
+"""A recorded sandbox: a session that takes commands, or one run of a
+supplied program. Its execution replays once its process exited."""
 
 from __future__ import annotations
 
 from typing import Any, Awaitable, Mapping, Optional, TypeVar
 
 from dvm.connection import Connection
-from dvm.errors import ConflictError, SandboxEndedError, SandboxFailedError
+from dvm.errors import ConflictError, DvmError, SandboxEndedError, SandboxFailedError
 from dvm.execution import Output
 from dvm.run_state import RunState
+from dvm.sandbox_session import AsyncCommand, CommandResult, SandboxSession
 
 T = TypeVar("T")
 
 class AsyncSandbox:
     """A sandbox, from ``await AsyncSandbox.create(image)``, or another
     process's, from ``await AsyncSandbox.connect(sandbox_id)``. Its ``id`` is
-    its execution's too. As a context manager, it's stopped at the end."""
+    its execution's too. With no command or entrypoint it takes commands;
+    its context ends input and waits for exit. A paused sandbox, or one
+    running a supplied program, is stopped at the end instead."""
 
-    def __init__(self, connection: Connection, sandbox: Mapping[str, Any]) -> None:
+    def __init__(
+        self, connection: Connection, sandbox: Mapping[str, Any],
+        *, input_offset: Optional[int] = None,
+    ) -> None:
         self._connection = connection
         self.id: int = sandbox["id"]
         self._path = f"/sandboxes/{self.id}"
         self.name: str = sandbox["spec"]["name"]
+        self._takes_commands = (
+            not sandbox["spec"].get("command") and sandbox["spec"].get("entrypoint") is None
+        )
+        self._session: Optional[SandboxSession] = None
+        self._input_offset = input_offset
 
     @classmethod
     async def create(
@@ -39,9 +50,10 @@ class AsyncSandbox:
         api_url: Optional[str] = None,
     ) -> AsyncSandbox:
         """A sandbox of ``image`` (as ``docker run`` takes it), once its
-        program started. Left out: the image's own command and entrypoint,
-        1 vCPU, 1024 MiB, seed 0, no variables beyond the image's, and named
-        after the image."""
+        process started. Without command or entrypoint it runs the sandbox
+        server and takes commands; the image's own program does not run.
+        Defaults: 1 vCPU, 1024 MiB, seed 0, the image's environment, user
+        and directory, and a name from the image."""
         draft: dict[str, Any] = {"image": image}
         given = {
             "command": command,
@@ -56,7 +68,8 @@ class AsyncSandbox:
             draft["environment"] = [{"name": key, "value": value} for key, value in env.items()]
         connection = Connection(api_key, api_url)
         try:
-            sandbox = cls(connection, await connection.json("POST", "/sandboxes", body=draft))
+            created = await connection.json("POST", "/sandboxes", body=draft)
+            sandbox = cls(connection, created, input_offset=0)
             await sandbox._wait_until_running()
         except BaseException:
             await connection.close()
@@ -113,12 +126,62 @@ class AsyncSandbox:
                 "GET", self._path, params={"newer_than": run["version"]}
             )
 
+    async def run(
+        self, command: list[str] | str, *, env: Optional[Mapping[str, str]] = None,
+        cwd: Optional[str] = None, stdin: Optional[bytes] = None,
+    ) -> CommandResult:
+        """Runs argv, or a shell script, to its end. Stdin bytes are sent
+        then closed; omitted stdin is empty. Nonzero codes are results.
+        """
+        handle = await self.start(
+            command, env=env, cwd=cwd, stdin=b"" if stdin is None else stdin,
+        )
+        return await handle.wait()
+
+    async def start(
+        self, command: list[str] | str, *, env: Optional[Mapping[str, str]] = None,
+        cwd: Optional[str] = None, stdin: Optional[bytes] = None,
+    ) -> AsyncCommand:
+        """Starts argv or a shell script and returns its handle. Supplied
+        stdin bytes are sent then closed; otherwise the handle owns stdin.
+        """
+        return await self._command_session().start(command, env=env, cwd=cwd, stdin=stdin)
+
+    async def write_file(self, path: str, data: bytes, *, mode: Optional[int] = None) -> None:
+        """Writes a whole file in pieces; mode defaults to 0o644, subject
+        to umask. Parent directories must exist; writes are not atomic.
+        """
+        await self._command_session().write_file(path, data, mode)
+
+    async def read_file(self, path: str) -> bytes:
+        """Reads a whole regular file as bytes, in protocol pieces."""
+        return await self._command_session().read_file(path)
+
+    async def end(self) -> int:
+        """Ends a command sandbox's input and waits for its exit code.
+        The server kills commands still running. Resume a paused sandbox first.
+        """
+        return await self._command_session().end()
+
+    def _command_session(self) -> SandboxSession:
+        if not self._takes_commands:
+            raise DvmError("this sandbox runs a supplied program and does not take commands")
+        if self._session is None:
+            self._session = SandboxSession(
+                self._connection, self.id, self.wait, self._input_offset, self._ended_error,
+            )
+        return self._session
+
     async def output(self) -> Output:
-        """What the program wrote so far (``Output``)."""
+        """What process 1 wrote so far. For a sandbox that takes commands,
+        stdout is the server's raw JSON answer lines, not command output.
+        """
         return Output.from_api(await self._connection.json("GET", f"/executions/{self.id}/output"))
 
     async def close(self) -> None:
         """Closes its connection; the sandbox goes on."""
+        if self._session is not None:
+            await self._session.close()
         await self._connection.close()
 
     async def __aenter__(self) -> AsyncSandbox:
@@ -126,7 +189,12 @@ class AsyncSandbox:
 
     async def __aexit__(self, *_: object) -> None:
         try:
-            await self.stop()
+            state = await self.state()
+            if state.is_active:
+                if self._takes_commands and state.kind != "paused":
+                    await self.end()
+                else:
+                    await self.stop()
         finally:
             await self.close()
 

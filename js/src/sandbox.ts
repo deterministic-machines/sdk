@@ -1,9 +1,10 @@
 import type { ApiRun, ApiSandbox } from "./api-json.ts";
 import { type CallOptions, type ClientOptions, Connection } from "./connection.ts";
-import { ConflictError } from "./errors.ts";
+import { ConflictError, DvmError } from "./errors.ts";
 import { type Output, outputOf } from "./execution.ts";
 import { RunState } from "./run-state.ts";
 import { endedErrorOf, SandboxCalls } from "./sandbox-calls.ts";
+import { Command, type CommandOptions, type CommandResult, SandboxSession, type WriteFileOptions } from "./sandbox-session.ts";
 
 /** What a sandbox is made of; left out: 1 vCPU, 1024 MiB, seed 0, no
  * variables beyond the image's, and named after the image. */
@@ -22,17 +23,23 @@ export class Sandbox implements AsyncDisposable {
   readonly id: number;
   readonly name: string;
   readonly #calls: SandboxCalls;
+  readonly #takesCommands: boolean;
+  readonly #inputOffset: number | undefined;
+  #session?: SandboxSession;
 
   /** A handle, over `connection`, to the sandbox the API answered with:
    * `Sandbox.create` and `Sandbox.connect` make one. */
-  constructor(connection: Connection, sandbox: { id: number; spec: { name: string } }) {
+  constructor(connection: Connection, sandbox: { id: number; spec: { name: string; command?: string[]; entrypoint?: string | null } }, inputOffset?: number) {
     this.id = sandbox.id;
     this.name = sandbox.spec.name;
     this.#calls = new SandboxCalls(connection, sandbox.id);
+    this.#takesCommands = !sandbox.spec.command?.length && sandbox.spec.entrypoint == null;
+    this.#inputOffset = inputOffset;
   }
 
   /** A sandbox of `image` (as `docker run` takes it), once it's running.
-   * A `signal` that aborts while it starts stops it. */
+   * Without command or entrypoint it takes commands, replacing the image's
+   * own program. A `signal` that aborts while it starts stops it. */
   static async create(image: string, options: SandboxOptions = {}): Promise<Sandbox> {
     const draft: Record<string, unknown> = { image };
     if (options.command !== undefined) draft.command = options.command;
@@ -46,7 +53,7 @@ export class Sandbox implements AsyncDisposable {
     const connection = await Connection.open(options);
     const { signal } = options;
     const created = await connection.json<ApiSandbox>("POST", "/sandboxes", { body: draft, signal });
-    const sandbox = new Sandbox(connection, created);
+    const sandbox = new Sandbox(connection, created, 0);
     try {
       await sandbox.#waitUntilRunning(created.run, signal);
     } catch (error) {
@@ -102,13 +109,46 @@ export class Sandbox implements AsyncDisposable {
     }
   }
 
+  async run(command: string[] | string, options: CommandOptions = {}): Promise<CommandResult> {
+    const handle = await this.start(command, { ...options, stdin: options.stdin ?? new Uint8Array() });
+    return handle.wait(options);
+  }
+
+  async start(command: string[] | string, options: CommandOptions = {}): Promise<Command> {
+    return this.#commandSession().start(command, options);
+  }
+
+  async writeFile(path: string, data: Uint8Array, options: WriteFileOptions = {}): Promise<void> {
+    await this.#commandSession().writeFile(path, data, options);
+  }
+
+  async readFile(path: string, options: CallOptions = {}): Promise<Uint8Array> {
+    return this.#commandSession().readFile(path, options);
+  }
+
+  async end(options: CallOptions = {}): Promise<number> {
+    return this.#commandSession().end(options);
+  }
+
+  #commandSession(): SandboxSession {
+    if (!this.#takesCommands) throw new DvmError("this sandbox runs a supplied program and does not take commands");
+    return this.#session ??= new SandboxSession(this.#calls, (options) => this.wait(options), this.#inputOffset);
+  }
+
+  /** Raw process output; a command sandbox's stdout is server answer lines. */
   async output(options: CallOptions = {}): Promise<Output> {
     return outputOf(await this.#calls.connection.json("GET", `/executions/${this.id}/output`, options));
   }
 
-  /** `await using` stops it at the scope's end. */
+  /** `await using` ends input and waits; paused or supplied programs stop. */
   async [Symbol.asyncDispose](): Promise<void> {
-    await this.stop();
+    try {
+      const state = await this.state();
+      if (state.isActive) {
+        if (this.#takesCommands && state.kind !== "paused") await this.end();
+        else await this.stop();
+      }
+    } finally { await this.#session?.close(); }
   }
 
   async #act(action: "pause" | "resume", options: CallOptions): Promise<void> {

@@ -1,9 +1,10 @@
 # dvm.run SDKs
 
 Clients for [dvm.run](https://dvm.run): sandboxes whose every run
-replays. Your agent makes a sandbox from an image and a command, waits for
-it, and reads its exit code and output; what it ran is its execution, which
-replays, the same, once it exited.
+replays. With no command or entrypoint, a sandbox takes commands and moves
+files through its SDK session. With either supplied, it is one run of that
+program. The whole session is one recorded execution, which replays once
+its input ends and the sandbox exits.
 
 | Language | Directory | Package |
 | --- | --- | --- |

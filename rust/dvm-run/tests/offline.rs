@@ -41,6 +41,7 @@ fn sandbox(state: RunState) -> Json<Sandbox> {
     let draft = SandboxDraft {
         name: "alpine".to_owned(),
         image: "alpine:3.20".to_owned(),
+        command: vec!["true".to_owned()],
         ..SandboxDraft::default()
     };
     Json(Sandbox {

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use dvm_api::{RunId, RunState, SandboxId};
 
@@ -6,7 +7,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// What the SDK returns when a call fails. A program's exit code is never
 /// one of these.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// 400: the request isn't one dvm.run takes, such as an image that
@@ -49,8 +50,11 @@ pub enum Error {
     Network {
         context: String,
         #[source]
-        source: Option<reqwest::Error>,
+        source: Option<Arc<reqwest::Error>>,
     },
+    /// The sandbox server refused a request, with its message.
+    #[error("{reason}")]
+    SandboxRequest { reason: String },
     /// dvm.run answered what the SDK can't read.
     #[error("{0}")]
     Unexpected(String),
@@ -79,7 +83,7 @@ impl Error {
     pub(crate) fn network(context: impl Into<String>, source: reqwest::Error) -> Self {
         Self::Network {
             context: context.into(),
-            source: Some(source),
+            source: Some(Arc::new(source)),
         }
     }
 }
