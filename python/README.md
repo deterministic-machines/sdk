@@ -1,6 +1,6 @@
 # dvm-run
 
-dvm.run's Python SDK.
+dvm.run's Python SDK, for Python 3.12 and newer.
 
 ```sh
 pip install dvm-run
@@ -100,3 +100,88 @@ end if still active. A stopped recording does not replay.
   the same methods for asyncio; blocking classes use those implementations.
 - The address is `DVM_API_URL`, the key is `DVM_API_KEY`, else the key
   `dvm-run login` saved for that address; both can be given in code.
+
+## Harbor and Terminal-Bench
+
+Install the SDK in Harbor's own environment, then select the provider:
+
+```sh
+uv tool install harbor --with dvm-run
+harbor run -p <task dir> --agent oracle --env dvm.harbor:DvmEnvironment
+```
+
+Harbor is not a dependency of `dvm-run`, and there is no Harbor extra.
+Only `dvm.harbor` imports Harbor; Harbor loads that module from its own
+installation. The provider is tested with Harbor 0.26.0. Credentials are
+the SDK's usual `DVM_API_URL`, `DVM_API_KEY`, or a saved `dvm-run login`.
+
+Each environment becomes a command sandbox from its `docker_image`, with
+the task's whole CPU count, memory and network policy. A command honors
+Harbor's working directory, environment and user. At a command deadline,
+the provider kills its process group and raises `TimeoutError`. Files use
+the SDK's file operations; directories travel as tar archives, preserving
+executable bits, links within the directory and empty directories. Images
+must include a POSIX shell and `tar`.
+
+The provider supports no network, public internet, and allowlists of exact
+hostnames, `*.domain` names, IPv4 addresses and IPv4 networks. Harbor can
+change the policy between phases through `set_network`. IPv6 is not
+supported. dvm.run always excludes the runner, its LAN and link-local
+addresses; existing connections survive a policy change.
+
+Harbor chooses shared or separate grading from the task configuration.
+For separate grading it moves the declared artifacts between sandboxes.
+The provider names them `<task>-agent` and `<task>-grading`, cut to
+dvm.run's rule for names (63 lowercase letters, digits and `-`). Harbor has
+no role parameter, so the provider identifies grading by `__verifier__`
+in Harbor's `session_id`. Stop ends input and waits for exit, keeping the
+whole recording replayable; it stops the sandbox only if ending input
+fails or takes more than 30 seconds. Both values of Harbor's `delete`
+argument retain the execution recording. `sandbox_id` gives its replay ID.
+
+dvm.run runs public prebuilt Linux images. The provider refuses missing
+images, image builds (including `force_build`), Docker Compose, multiple
+containers, GPUs, TPUs, Windows and host mounts before creating a sandbox.
+A Dockerfile alongside a `docker_image` is not built. Storage uses the
+platform's default; Harbor's `storage_mb` is not applied.
+
+The published `terminal-bench/terminal-bench@latest` registry was checked
+on 2026-11-14: all 66 tasks have digest-pinned `docker_image` values under
+both `[environment]` and `[verifier.environment]`, and separate graders.
+The dataset digest was
+`sha256:5881c1b1c74a96f07baef00a7c869e09802704bc0dc912c870e7acccc11440da`.
+Download those tasks with:
+
+```sh
+harbor download terminal-bench/terminal-bench@latest -o tasks
+```
+
+Source checkouts can omit these image fields. To use such a checkout,
+name the already published images in `task.toml`: set
+`[environment].docker_image` to the release manifest's environment
+`pinned_ref`, and `[verifier.environment].docker_image` to its verifier
+`pinned_ref`, with `[verifier].environment_mode = "separate"`. An explicit
+verifier image must already contain its tests; Harbor treats them as
+bundled. Tasks requiring Compose or accelerators remain unsupported.
+
+## Tests
+
+From the repository root, the Nix shell supplies Python, pytest and uv:
+
+```sh
+nix develop -c bash -c 'cd python && pytest -q'
+nix develop -c bash -c 'cd python && uv run --no-project --with harbor --with pytest --with-editable . pytest -q'
+```
+
+The first command skips the Harbor modules when Harbor is absent. The
+second runs them in a uv-managed environment without adding Harbor to the
+SDK's dependencies. To run only the oracle and replay test, set
+`DVM_API_URL` and `DVM_API_KEY`, then run:
+
+```sh
+nix develop -c bash -c 'cd python && uv run --no-project --with harbor --with pytest --with-editable . pytest -q tests/test_harbor_platform.py'
+```
+
+That test uses `tests/harbor-task`, a tiny task on `python:3.12-slim`. It
+checks the oracle reward, the artifact handoff to separate grading, and
+that both complete sandbox executions replay `same`.
