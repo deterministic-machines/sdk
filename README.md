@@ -8,7 +8,7 @@ its input ends and the sandbox exits.
 
 | Language | Directory | Package |
 | --- | --- | --- |
-| Python | [`python/`](python) | [`dvm-run`](https://pypi.org/project/dvm-run/) |
+| Python 3.12+ | [`python/`](python) | [`dvm-run`](https://pypi.org/project/dvm-run/) |
 | JavaScript, TypeScript | [`js/`](js) | [`dvm-run`](https://www.npmjs.com/package/dvm-run) |
 | Rust | [`rust/`](rust) | [`dvm-run`](https://crates.io/crates/dvm-run), over [`dvm-api`](https://crates.io/crates/dvm-api) |
 

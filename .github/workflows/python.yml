@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.12", "3.13", "3.14"]
     defaults:
       run:
         working-directory: python
@@ -26,3 +26,5 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install . pytest
       - run: pytest -q
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --no-project --python ${{ matrix.python }} --with harbor --with pytest --with-editable . pytest -q tests/test_harbor.py tests/test_harbor_platform.py
