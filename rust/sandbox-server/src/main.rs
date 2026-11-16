@@ -10,10 +10,8 @@ fn main() {
             id: None,
             answer: dvm_api::SandboxAnswerKind::Error(error.to_string()),
         };
-        if let Ok(mut line) = serde_json::to_vec(&answer) {
-            line.push(b'\n');
-            unsafe { libc::write(1, line.as_ptr().cast(), line.len()) };
-        }
+        let frame = dvm_api::encode_frame(&answer, &[]);
+        unsafe { libc::write(1, frame.as_ptr().cast(), frame.len()) };
         std::process::exit(1);
     }
 }

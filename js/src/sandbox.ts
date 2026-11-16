@@ -1,7 +1,7 @@
 import type { ApiRun, ApiSandbox } from "./api-json.ts";
 import { type CallOptions, type ClientOptions, Connection } from "./connection.ts";
 import { ConflictError, DvmError } from "./errors.ts";
-import { type Output, outputOf } from "./execution.ts";
+import { type Output, readOutput } from "./execution.ts";
 import { RunState } from "./run-state.ts";
 import { endedErrorOf, SandboxCalls } from "./sandbox-calls.ts";
 import { Command, type CommandOptions, type CommandResult, SandboxSession, type WriteFileOptions } from "./sandbox-session.ts";
@@ -162,9 +162,9 @@ export class Sandbox implements AsyncDisposable {
     return this.#session ??= new SandboxSession(this.#calls, (options) => this.wait(options), this.#inputOffset);
   }
 
-  /** Raw process output; a command sandbox's stdout is server answer lines. */
+  /** Raw process output; a command sandbox's stdout is server answer frames. */
   async output(options: CallOptions = {}): Promise<Output> {
-    return outputOf(await this.#calls.connection.json("GET", `/executions/${this.id}/output`, options));
+    return readOutput(this.#calls.connection, `/executions/${this.id}/output`, options);
   }
 
   /** `await using` ends input and waits; paused or supplied programs stop. */

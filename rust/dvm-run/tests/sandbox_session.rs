@@ -2,13 +2,15 @@ use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::sync::{Arc, Mutex};
 
+use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use dvm_run::api::{
-    ApiError, ByteChunk, OutputAfter, Run, RunId, RunOutput, RunState, SandboxDraft, SandboxId,
-    SandboxInput, SandboxInputState, SandboxRequest, SandboxRequestAction, SandboxSpec, Timestamp,
+    ApiError, ByteChunk, FrameDecoder, OutputAfter, Run, RunId, RunOutput, RunState, SandboxDraft,
+    SandboxId, SandboxInput, SandboxInputState, SandboxRequest, SandboxRequestAction, SandboxSpec,
+    Timestamp, encode_frame,
 };
 use dvm_run::{Client, Command, Error, Sandbox};
 use serde_json::{Value, json};
@@ -16,6 +18,8 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 struct Input {
     length: u64,
+    base: u64,
+    decoder: FrameDecoder,
     probes: usize,
     posts: usize,
     ends: usize,
@@ -28,14 +32,14 @@ struct Input {
 #[derive(Clone)]
 struct Streams {
     input: Arc<Mutex<Input>>,
-    requests: mpsc::UnboundedSender<(u64, SandboxRequest)>,
+    requests: mpsc::UnboundedSender<(u64, SandboxRequest, Vec<u8>)>,
     output: Arc<AsyncMutex<mpsc::UnboundedReceiver<OutputAfter>>>,
     send_output: mpsc::UnboundedSender<OutputAfter>,
 }
 struct Fixture {
     sandbox: Sandbox,
     streams: Streams,
-    requests: mpsc::UnboundedReceiver<(u64, SandboxRequest)>,
+    requests: mpsc::UnboundedReceiver<(u64, SandboxRequest, Vec<u8>)>,
     server: tokio::task::JoinHandle<()>,
 }
 impl Drop for Fixture {
@@ -51,6 +55,8 @@ impl Fixture {
         let streams = Streams {
             input: Arc::new(Mutex::new(Input {
                 length,
+                base: length,
+                decoder: FrameDecoder::default(),
                 state,
                 program,
                 probes: 0,
@@ -89,12 +95,12 @@ impl Fixture {
     fn bytes(&self, bytes: Vec<u8>, more: bool) {
         self.streams.send_output.send(output(bytes, more)).unwrap();
     }
-    async fn next(&mut self) -> (u64, SandboxRequest) {
+    async fn next(&mut self) -> (u64, SandboxRequest, Vec<u8>) {
         self.requests.recv().await.unwrap()
     }
     async fn start(&mut self, name: &str) -> (Command, u64) {
         let pending = tokio::spawn(self.sandbox.start(name).into_future());
-        let (id, request) = self.next().await;
+        let (id, request, _) = self.next().await;
         assert_eq!(id, request.id);
         self.emit(&[json!({"id": id, "started": {"pid": 1, "argv": [name]}})]);
         (pending.await.unwrap().unwrap(), id)
@@ -104,8 +110,14 @@ impl Fixture {
 fn lines(answers: &[Value]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for answer in answers {
-        bytes.extend(serde_json::to_vec(answer).unwrap());
-        bytes.push(b'\n');
+        let mut header = answer.clone();
+        let payload: Vec<u8> = header
+            .as_object_mut()
+            .unwrap()
+            .remove("payload")
+            .map(|v| serde_json::from_value(v).unwrap())
+            .unwrap_or_default();
+        bytes.extend(encode_frame(&header, &payload));
     }
     bytes
 }
@@ -116,6 +128,7 @@ fn output(bytes: Vec<u8>, more: bool) -> OutputAfter {
             stderr: ByteChunk::default(),
         },
         more,
+        cut: false,
     }
 }
 fn api_run(state: RunState) -> Run {
@@ -155,10 +168,12 @@ async fn sandbox(State(streams): State<Streams>) -> Json<dvm_run::api::Sandbox> 
 }
 async fn input(
     State(streams): State<Streams>,
-    Json(chunk): Json<SandboxInput>,
+    Query(chunk): Query<SandboxInput>,
+    headers: HeaderMap,
+    bytes: Bytes,
 ) -> Result<Json<SandboxInputState>, (StatusCode, Json<ApiError>)> {
     let mut input = streams.input.lock().unwrap();
-    let bytes = chunk.chunk.bytes();
+    assert_eq!(headers["content-type"], "application/octet-stream");
     if !bytes.is_empty() {
         input.posts += 1;
         if input.refuse {
@@ -170,10 +185,16 @@ async fn input(
             ));
         }
         assert_eq!(chunk.offset, input.length);
-        assert!(bytes.len() <= 65536 && bytes.last() == Some(&b'\n'));
-        let request = serde_json::from_slice(bytes).unwrap();
-        streams.requests.send((chunk.offset, request)).unwrap();
+        assert!(bytes.len() <= SandboxInput::MAX_CHUNK_BYTES);
+        input.decoder.push(&bytes);
         input.length += bytes.len() as u64;
+        while let Some(frame) = input.decoder.next_frame::<SandboxRequest>() {
+            let frame = frame.unwrap();
+            streams
+                .requests
+                .send((input.base + frame.span.start, frame.header, frame.payload))
+                .unwrap();
+        }
     } else if !chunk.end {
         assert_eq!(chunk.offset, 0);
         input.probes += 1;
@@ -198,22 +219,25 @@ async fn stop(State(streams): State<Streams>) -> Json<Run> {
 async fn output_after(
     State(streams): State<Streams>,
     Query(query): Query<HashMap<String, u64>>,
-) -> Json<OutputAfter> {
+) -> ([(&'static str, &'static str); 1], Vec<u8>) {
     assert_eq!(query["offset"], streams.input.lock().unwrap().output_offset);
     let chunk = streams.output.lock().await.recv().await.unwrap();
     streams.input.lock().unwrap().output_offset += chunk.output.stdout.bytes().len() as u64;
-    Json(chunk)
+    (
+        [("content-type", "application/octet-stream")],
+        chunk.to_frame(),
+    )
 }
 
 #[tokio::test]
 async fn split_lines_and_interleaved_commands_use_input_offsets() {
     let mut fixture = Fixture::new(123, RunState::Exited { code: 0 }, false).await;
     let first = tokio::spawn(fixture.sandbox.start(["first"]).into_future());
-    let (aid, a) = fixture.next().await;
+    let (aid, a, _) = fixture.next().await;
     assert_eq!((aid, a.id), (123, 123));
     assert!(matches!(a.action, SandboxRequestAction::Run(run) if run.user.is_none()));
     let second = tokio::spawn(fixture.sandbox.start("second").user("agent").into_future());
-    let (bid, b) = fixture.next().await;
+    let (bid, b, _) = fixture.next().await;
     assert!(bid > aid);
     assert_eq!(b.id, bid);
     assert!(
@@ -222,24 +246,25 @@ async fn split_lines_and_interleaved_commands_use_input_offsets() {
     let answers = lines(&[
         json!({"id": aid, "started": {"pid": 1, "argv": ["first"]}}),
         json!({"id": bid, "started": {"pid": 2, "argv": ["sh", "-c", "second"]}}),
-        json!({"id": aid, "stdout": "YQ=="}),
+        json!({"id": aid, "stdout": true, "payload": b"a"}),
     ]);
     fixture.bytes(answers[..answers.len() - 4].to_vec(), true);
     fixture.bytes(answers[answers.len() - 4..].to_vec(), true);
     let a = Arc::new(first.await.unwrap().unwrap());
     let b = second.await.unwrap().unwrap();
-    let data: Vec<u8> = (0..102400).map(|i| (i % 256) as u8).collect();
+    let data: Vec<u8> = (0..2304000).map(|i| (i % 256) as u8).collect();
     let write_a = a.clone();
     let write_data = data.clone();
     let writing = tokio::spawn(async move { write_a.write_stdin(&write_data).await });
     let mut received = Vec::new();
     while received.len() < data.len() {
-        let (_, request) = fixture.next().await;
+        let (_, request, payload) = fixture.next().await;
         assert_eq!(request.id, aid);
-        let SandboxRequestAction::Stdin(piece) = request.action else {
+        let SandboxRequestAction::Stdin(_) = request.action else {
             panic!("not stdin")
         };
-        received.extend_from_slice(piece.data.bytes());
+        assert!(payload.len() <= 1024 * 1024);
+        received.extend_from_slice(&payload);
     }
     writing.await.unwrap().unwrap();
     assert_eq!(received, data);
@@ -248,8 +273,8 @@ async fn split_lines_and_interleaved_commands_use_input_offsets() {
         matches!(fixture.next().await.1.action, SandboxRequestAction::Stdin(piece) if piece.close)
     );
     fixture.emit(&[
-        json!({"id": bid, "stdout": "Yg=="}),
-        json!({"id": aid, "stderr": "ZXJy"}),
+        json!({"id": bid, "stdout": true, "payload": b"b"}),
+        json!({"id": aid, "stderr": true, "payload": b"err"}),
         json!({"id": bid, "exited": {"code": 3}}),
         json!({"id": aid, "exited": {"code": 0}}),
     ]);
@@ -324,7 +349,7 @@ async fn errors_dispatch_to_one_or_all_operations() {
 #[tokio::test]
 async fn files_are_cut_into_bounded_pieces_and_read_back() {
     let mut fixture = Fixture::new(0, RunState::Exited { code: 0 }, false).await;
-    let data: Vec<u8> = (0..153600).map(|i| (i % 256) as u8).collect();
+    let data: Vec<u8> = (0..2304000).map(|i| (i % 256) as u8).collect();
     let writing = tokio::spawn(
         fixture
             .sandbox
@@ -335,13 +360,14 @@ async fn files_are_cut_into_bounded_pieces_and_read_back() {
     let mut received = Vec::new();
     let mut write_id = None;
     loop {
-        let (_, request) = fixture.next().await;
+        let (_, request, payload) = fixture.next().await;
         assert_eq!(*write_id.get_or_insert(request.id), request.id);
         let SandboxRequestAction::Write(piece) = request.action else {
             panic!("not write")
         };
         assert_eq!((piece.path.as_str(), piece.mode), ("/tmp/a", Some(0o600)));
-        received.extend_from_slice(piece.data.bytes());
+        assert!(payload.len() <= 1024 * 1024);
+        received.extend_from_slice(&payload);
         if piece.last {
             break;
         }
@@ -351,11 +377,11 @@ async fn files_are_cut_into_bounded_pieces_and_read_back() {
     writing.await.unwrap().unwrap();
     let sandbox = fixture.sandbox.clone();
     let reading = tokio::spawn(async move { sandbox.read_file("/tmp/a").await });
-    let (rid, request) = fixture.next().await;
+    let (rid, request, _) = fixture.next().await;
     assert!(rid > write_id.unwrap());
     assert!(matches!(request.action, SandboxRequestAction::Read(read) if read.path == "/tmp/a"));
     for piece in data.chunks(8000) {
-        fixture.emit(&[json!({"id": rid, "data": ByteChunk::new(piece.to_vec())})]);
+        fixture.emit(&[json!({"id": rid, "data": true, "payload": piece})]);
     }
     fixture.emit(&[json!({"id": rid, "end": true})]);
     assert_eq!(reading.await.unwrap().unwrap(), data);

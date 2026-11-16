@@ -119,6 +119,73 @@ impl Client {
             .map_err(|error| Error::Unexpected(format!("{path}'s answer: {error}")))
     }
 
+    pub(crate) async fn input(
+        &self,
+        path: &str,
+        input: &dvm_api::SandboxInput,
+        body: Vec<u8>,
+    ) -> Result<dvm_api::SandboxInputState> {
+        let request = self
+            .request(Method::POST, path, &[])
+            .query(input)
+            .timeout(QUIET_LIMIT)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(body);
+        let bytes = self
+            .send(path, request)
+            .await?
+            .bytes()
+            .await
+            .map_err(|error| Error::network(format!("reading {path}"), error))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|error| Error::Unexpected(format!("{path}'s answer: {error}")))
+    }
+
+    pub(crate) async fn output_after(
+        &self,
+        path: &str,
+        offset: u64,
+        stderr_offset: u64,
+    ) -> Result<dvm_api::OutputAfter> {
+        let query = [
+            ("offset", offset.to_string()),
+            ("stderr_offset", stderr_offset.to_string()),
+        ];
+        self.output_page(path, &query).await
+    }
+
+    /// What the run has written so far: the first page at once, then the
+    /// rest of what each page stopped short of.
+    pub(crate) async fn output(&self, path: &str) -> Result<dvm_api::RunOutput> {
+        let mut page = self.output_page(path, &[]).await?;
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        loop {
+            stdout.extend_from_slice(page.output.stdout.bytes());
+            stderr.extend_from_slice(page.output.stderr.bytes());
+            if !page.cut {
+                return Ok(dvm_api::RunOutput {
+                    stdout: dvm_api::ByteChunk::new(stdout),
+                    stderr: dvm_api::ByteChunk::new(stderr),
+                });
+            }
+            page = self
+                .output_after(path, stdout.len() as u64, stderr.len() as u64)
+                .await?;
+        }
+    }
+
+    async fn output_page(&self, path: &str, query: Query<'_>) -> Result<dvm_api::OutputAfter> {
+        let request = self.request(Method::GET, path, query).timeout(QUIET_LIMIT);
+        let bytes = self
+            .send(path, request)
+            .await?
+            .bytes()
+            .await
+            .map_err(|error| Error::network(format!("reading {path}"), error))?;
+        dvm_api::OutputAfter::from_frame(&bytes)
+            .map_err(|error| Error::Unexpected(format!("{path}'s answer: {error}")))
+    }
+
     fn request(&self, method: Method, path: &str, query: Query<'_>) -> RequestBuilder {
         let request = self
             .inner

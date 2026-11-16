@@ -69,6 +69,16 @@ class Connection:
         response = await self._send(method, path, params=params, json=body)
         return response.json() if response.content else None
 
+    async def input(self, path: str, data: bytes, *, offset: int, end: bool) -> Any:
+        response = await self._send(
+            "POST", path, params={"offset": offset, "end": str(end).lower()},
+            content=data, headers={"Content-Type": "application/octet-stream"},
+        )
+        return response.json()
+
+    async def bytes(self, path: str, *, params: Optional[Mapping[str, Any]] = None) -> bytes:
+        return (await self._send("GET", path, params=params)).content
+
     async def close(self) -> None:
         await self._client.aclose()
 

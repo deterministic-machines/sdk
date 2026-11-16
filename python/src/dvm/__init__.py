@@ -26,7 +26,7 @@ from dvm.run_state import RunState
 from dvm.sandbox import AsyncSandbox
 from dvm.sandbox_session import AsyncCommand, CommandResult
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "ApiError",

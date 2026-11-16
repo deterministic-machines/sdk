@@ -1,7 +1,10 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
-use dvm_api::{SandboxAnswer, SandboxAnswerKind, SandboxRequest, SandboxRequestAction};
+use dvm_api::{
+    FrameDecoder, FrameError, SandboxAnswer, SandboxAnswerKind, SandboxRequest,
+    SandboxRequestAction, encode_frame,
+};
 
 use crate::commands::Commands;
 use crate::files::Files;
@@ -13,8 +16,7 @@ pub struct Answers {
 }
 
 struct Requests {
-    line: Vec<u8>,
-    too_long: bool,
+    decoder: FrameDecoder,
     last_id: Option<u64>,
     files: Files,
 }
@@ -30,8 +32,7 @@ pub fn serve() -> io::Result<()> {
     let mut commands = Commands::new()?;
     let mut answers = Answers { buffer: Vec::new() };
     let mut requests = Requests {
-        line: Vec::new(),
-        too_long: false,
+        decoder: FrameDecoder::default(),
         last_id: None,
         files: Files::new(),
     };
@@ -92,39 +93,42 @@ impl Requests {
             };
         }
         if count == 0 {
-            if !self.line.is_empty() || self.too_long {
-                self.error(None, "unterminated request line", answers);
+            if self.decoder.buffered() != 0 {
+                self.error(None, FrameError::Cut, answers);
             }
             return Ok(true);
         }
-        for &byte in &bytes[..count as usize] {
-            if byte == b'\n' {
-                if self.too_long {
-                    self.error(None, "request line exceeds 65536 bytes", answers);
-                } else {
-                    self.dispatch(commands, poller, answers);
+        self.decoder.push(&bytes[..count as usize]);
+        while let Some(frame) = self.decoder.next_frame::<serde_json::Value>() {
+            match frame {
+                Ok(frame) => self.dispatch(frame.header, &frame.payload, commands, poller, answers),
+                Err(error) => {
+                    let ended =
+                        matches!(error, FrameError::LongHeader | FrameError::LongPayload(_));
+                    self.error(None, error, answers);
+                    if ended {
+                        return Ok(true);
+                    }
                 }
-                self.line.clear();
-                self.too_long = false;
-            } else if self.line.len() == 65536 {
-                self.too_long = true;
-            } else if !self.too_long {
-                self.line.push(byte);
             }
         }
         Ok(false)
     }
 
-    fn dispatch(&mut self, commands: &mut Commands, poller: &Poller, answers: &mut Answers) {
-        let request = match serde_json::from_slice::<SandboxRequest>(&self.line) {
+    fn dispatch(
+        &mut self,
+        value: serde_json::Value,
+        payload: &[u8],
+        commands: &mut Commands,
+        poller: &Poller,
+        answers: &mut Answers,
+    ) {
+        let request = match serde_json::from_value::<SandboxRequest>(value.clone()) {
             Ok(request) => request,
             Err(error) => {
-                let value = serde_json::from_slice::<serde_json::Value>(&self.line).ok();
-                let id = value.as_ref().and_then(|value| value.get("id")?.as_u64());
+                let id = value.get("id").and_then(serde_json::Value::as_u64);
                 if let Some(id) = id
-                    && value
-                        .as_ref()
-                        .is_some_and(|value| value.get("write").is_some())
+                    && value.get("write").is_some()
                 {
                     self.files.abort_write(id);
                 }
@@ -157,11 +161,11 @@ impl Requests {
         }
         let result = match request.action {
             SandboxRequestAction::Run(run) => commands.run(id, run, poller, answers),
-            SandboxRequestAction::Stdin(input) => commands.stdin(id, input, poller),
+            SandboxRequestAction::Stdin(input) => commands.stdin(id, input, payload, poller),
             SandboxRequestAction::Signal(signal) => commands.signal(id, signal),
             SandboxRequestAction::Write(piece) => self
                 .files
-                .write(id, piece)
+                .write(id, piece, payload)
                 .map(|last| {
                     if last {
                         answers.push(Some(id), SandboxAnswerKind::Written(true));
@@ -233,9 +237,12 @@ impl Poller {
 
 impl Answers {
     pub fn push(&mut self, id: Option<u64>, answer: SandboxAnswerKind) {
-        serde_json::to_writer(&mut self.buffer, &SandboxAnswer { id, answer })
-            .expect("JSON answer");
-        self.buffer.push(b'\n');
+        self.bytes(id, answer, &[]);
+    }
+
+    pub fn bytes(&mut self, id: Option<u64>, answer: SandboxAnswerKind, payload: &[u8]) {
+        self.buffer
+            .extend(encode_frame(&SandboxAnswer { id, answer }, payload));
     }
 
     pub fn error(&mut self, id: Option<u64>, error: impl std::fmt::Display) {

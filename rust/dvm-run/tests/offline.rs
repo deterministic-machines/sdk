@@ -67,7 +67,12 @@ async fn an_already_exited_program_can_be_created_and_waited() {
             )
             .route(
                 "/api/executions/1/output",
-                get(|| async { Json(serde_json::json!({ "stdout": "/wA=", "stderr": "" })) }),
+                get(|| async {
+                    dvm_run::api::encode_frame(
+                        &serde_json::json!({ "stdout": 2, "stderr": 0, "more": false, "cut": false }),
+                        &[255, 0],
+                    )
+                }),
             ),
     )
     .await;
@@ -203,4 +208,43 @@ async fn a_scope_stops_its_sandbox_even_when_the_operation_fails() {
         .await;
     assert!(matches!(result, Err(Error::Unexpected(reason)) if reason == "operation failed"));
     assert_eq!(stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn output_follows_pages_and_advances_both_offsets() {
+    use axum::extract::Query;
+    use std::collections::HashMap;
+
+    let data = vec![255; 4 * 1024 * 1024];
+    let page = data.clone();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = asked.clone();
+    let client = controller(Router::new()
+        .route("/api/sandboxes/1", get(|| async { sandbox(RunState::Exited { code: 0 }) }))
+        .route("/api/executions/1/output", get(move |Query(query): Query<HashMap<String, usize>>| {
+            let data = page.clone();
+            let page = counted.fetch_add(1, Ordering::SeqCst);
+            async move {
+                // A sandbox still going: `more` stays true, and its output
+                // so far ends where a page isn't cut.
+                let (stdout, stderr, cut) = match page {
+                    0 => {
+                        assert!(query.is_empty(), "{query:?}");
+                        (data.clone(), data, true)
+                    }
+                    1 => {
+                        assert_eq!((query["offset"], query["stderr_offset"]), (data.len(), data.len()));
+                        (vec![0, 255], vec![128], false)
+                    }
+                    _ => panic!("unexpected output page"),
+                };
+                let header = serde_json::json!({"stdout": stdout.len(), "stderr": stderr.len(), "more": true, "cut": cut});
+                ([("content-type", "application/octet-stream")], dvm_run::api::encode_frame(&header, &[stdout, stderr].concat()))
+            }
+        }))).await;
+    let sandbox = client.connect_sandbox(SandboxId::new(1)).await.unwrap();
+    let output = sandbox.output().await.unwrap();
+    assert_eq!(output.stdout.bytes(), [data.as_slice(), &[0, 255]].concat());
+    assert_eq!(output.stderr.bytes(), [data.as_slice(), &[128]].concat());
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
 }

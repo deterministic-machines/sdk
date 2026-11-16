@@ -6,13 +6,18 @@ groups, and reads and writes files. One epoll loop watches stdin, command
 pipes and a signalfd. dvm sees only a program using Linux syscalls;
 recording its stdin records the session.
 
-## JSON lines
+## Frames
 
-Each request is one JSON object followed by LF. Its JSON, excluding LF,
-is at most 65,536 bytes. An oversized line is discarded through its LF and
-gets one error. An unfinished line at EOF gets an error and stops the
-server. Answers are also JSON objects followed by LF. Only answer lines
-are written to stdout; stderr stays empty. There is no terminal.
+Each request and answer is a frame: one JSON object followed by LF, then
+exactly the number of raw bytes named by its top-level `bytes` field.
+`bytes` is omitted for an empty payload. The JSON header, excluding LF,
+is at most 64 KiB, and a payload is at most 16 MiB. Only frames are written
+to stdout; stderr stays empty. There is no terminal.
+
+A malformed header gets one error and decoding continues after that
+frame, including any counted payload. A header or payload over its limit
+gets an error and stops request handling, like EOF. An incomplete frame
+at EOF gets an error before the server stops.
 
 Stdout stays blocking. Answers from one pass of the loop are buffered
 together and written at the end of that pass. A slow reader slows the
@@ -23,8 +28,8 @@ The types are exported from `dvm-api`: `SandboxRequest`,
 `SandboxRequestAction`, `SandboxRun`, `SandboxProgram`, `SandboxStdin`,
 `SandboxWrite`, `SandboxRead`, `SandboxAnswer`, `SandboxAnswerKind`,
 `SandboxStarted`, and `SandboxExited`. Their TypeScript is included by
-`dvm_api::export_typescript`, like the controller types. `ByteChunk`
-encodes arbitrary bytes as standard, padded base64; empty bytes are `""`.
+`dvm_api::export_typescript`, like the controller types. `encode_frame`
+and `FrameDecoder` in `dvm-api` encode and split their frames.
 
 Every request has an unsigned 64-bit integer `id`. JavaScript callers
 should choose safe integers. A run, read, or first write piece must have
@@ -33,12 +38,12 @@ id may be zero and gaps are allowed. An accepted start consumes its id
 even if the operation fails. A lower or equal id gets an error naming
 the last started id. The server keeps only that last id. Pieces of an
 open write share its id; stdin and signals refer to a command's id.
-Unknown fields, multiple operations on a line, and multiple program
+Unknown fields, multiple operations in a frame, and multiple program
 choices are errors. A bad request gets an `error` and
 the server continues. The error includes its id when it can be recovered
 from a valid JSON object, otherwise it has no id.
 An error without an id also aborts every open write, each with an error
-under its own id: the lost line may have contained a piece of any write.
+under its own id: the lost frame may have contained a piece of any write.
 A later piece cannot complete an aborted write. Command stdin has the
 same risk: after an error without an id, a client cannot tell which
 request was lost or whether it contained stdin bytes.
@@ -94,17 +99,19 @@ signal dispositions. Its fd 0 is a blocking pipe reader if `stdin` was
 true, otherwise `/dev/null`; fds 1 and 2 are separate blocking pipe
 writers. Every other descriptor is closed before exec.
 
-`stdin` supplies `data`, `close`, or both. Omitted data is empty and
-omitted close is false. Bytes are queued and sent without waiting for
-the command to read. A close takes effect after those bytes are sent.
+`stdin` supplies its bytes in the frame payload; `close` defaults to
+false. Bytes are queued and sent without waiting for the command to read. A close takes effect after those bytes are sent.
 Further input while a close is pending is refused. Input to an already
 closed or absent stdin pipe is ignored. Reaping the command closes its
 stdin and discards any unsent bytes. For an id up to the last started id
 with no live command, input does nothing; a larger id is an error.
 
-```json
-{"id":1,"stdin":{"data":"aGk=","close":true}}
+```text
+{"id":1,"stdin":{"close":true},"bytes":2}
+hi
 ```
+
+Here and below, the payload `hi` has two bytes, with no trailing LF.
 
 `signal` sends a number from 1 through 64 to the command's entire process
 group. Other numbers always get an error, regardless of the id's state.
@@ -128,8 +135,9 @@ directory is created. Writes are not atomic or rolled back on error.
 A piece without an open write must start a new operation with a larger
 id; a piece using an old id gets an error naming the last started id.
 
-```json
-{"id":3,"write":{"path":"/repo/a","mode":420,"data":"aGk=","last":true}}
+```text
+{"id":3,"write":{"path":"/repo/a","mode":420,"last":true},"bytes":2}
+hi
 ```
 
 `read` opens a regular file and streams its bytes. A directory produces
@@ -153,16 +161,18 @@ passed to exec (the shell and its arguments for a script).
 {"id":1,"started":{"pid":7,"argv":["ls","-l"]}}
 ```
 
-`stdout` and `stderr` carry separate chunks of base64 bytes. Chunk
+`stdout` and `stderr` mark separate chunks of raw payload bytes. Chunk
 boundaries have no meaning. There is no order promised between the two
 streams or between different ids; each stream preserves byte order.
 
-```json
-{"id":1,"stdout":"aGk="}
+```text
+{"id":1,"stdout":true,"bytes":2}
+hi
 ```
 
-```json
-{"id":1,"stderr":"ZXJyb3IK"}
+```text
+{"id":1,"stderr":true,"bytes":2}
+hi
 ```
 
 `exited` is sent when the command's process is reaped, after every byte
@@ -182,11 +192,12 @@ The server forgets a command once it is reaped and both pipes end.
 {"id":3,"written":true}
 ```
 
-`data` carries successive file bytes; `end` closes a successful read,
+`data` marks successive payloads of at most 256 KiB of file bytes; `end` closes a successful read,
 including an empty file. A failed read gets an error instead of end.
 
-```json
-{"id":4,"data":"aGk="}
+```text
+{"id":4,"data":true,"bytes":2}
+hi
 ```
 
 ```json
@@ -201,7 +212,7 @@ written bytes remain. It is not a command exit notification.
 ```
 
 ```json
-{"error":"request line exceeds 65536 bytes"}
+{"error":"a frame's header is longer than 65536 bytes"}
 ```
 
 ## Lifetime

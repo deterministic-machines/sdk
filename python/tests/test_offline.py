@@ -1,6 +1,5 @@
 """Lifecycle and byte output against fixed HTTP answers."""
 import asyncio
-import base64
 import json
 
 import httpx
@@ -8,6 +7,7 @@ import pytest
 
 from dvm import AsyncSandbox, DvmError, SandboxEndedError, SandboxFailedError, Verdict
 from dvm.connection import Connection
+from dvm.frame import encode_frame
 
 
 def sandbox_answered_by(answer):
@@ -38,7 +38,7 @@ def test_output_keeps_every_byte():
     data = bytes(range(256))
     def answer(request):
         assert request.url.path == "/api/executions/5/output"
-        return httpx.Response(200, json={"stdout": base64.b64encode(data).decode(), "stderr": "AA=="})
+        return httpx.Response(200, content=encode_frame({"stdout": len(data), "stderr": 1, "more": False, "cut": False}, data + b"\0"))
     output = asyncio.run(sandbox_answered_by(answer).output())
     assert (output.stdout, output.stderr) == (data, b"\0")
 
@@ -76,3 +76,24 @@ def test_set_network_puts_the_mode_and_an_allowlists_entries():
     assert bodies == [{"mode": "none"}, {"mode": "allowlist", "allow": ["pypi.org", "8.8.8.0/24"]}]
     with pytest.raises(ValueError):
         asyncio.run(sandbox.set_network("public", ["pypi.org"]))
+
+
+def test_output_follows_pages_and_advances_both_offsets():
+    data = bytes(range(256)) * (4 * 1024 * 1024 // 256)
+    pages = iter([(data, data, True), (b"tail", b"\xfferr", False)])
+    offsets = None
+    def answer(request):
+        # A sandbox still going: `more` stays true, and its output so far
+        # ends where a page isn't cut.
+        nonlocal offsets
+        params = request.url.params
+        assert (offsets is None and not params) or (
+            (int(params["offset"]), int(params["stderr_offset"])) == offsets)
+        stdout, stderr, cut = next(pages)
+        offsets = ((offsets or (0, 0))[0] + len(stdout), (offsets or (0, 0))[1] + len(stderr))
+        return httpx.Response(200, content=encode_frame(
+            {"stdout": len(stdout), "stderr": len(stderr), "more": True, "cut": cut}, stdout + stderr,
+        ))
+    output = asyncio.run(sandbox_answered_by(answer).output())
+    assert output.stdout == data + b"tail"
+    assert output.stderr == data + b"\xfferr"

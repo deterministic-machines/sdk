@@ -6,13 +6,13 @@ use std::os::fd::AsRawFd;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use dvm_api::ByteChunk;
+use dvm_api::{FrameDecoder, encode_frame};
 use serde_json::Value;
 
 pub struct Session {
     pub child: Child,
     input: Option<ChildStdin>,
-    pending: Vec<u8>,
+    decoder: FrameDecoder,
     answers: VecDeque<Value>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -67,7 +67,7 @@ impl Session {
         Self {
             child,
             input,
-            pending: Vec::new(),
+            decoder: FrameDecoder::default(),
             answers: VecDeque::new(),
             stdout: Vec::new(),
             stderr: Vec::new(),
@@ -77,9 +77,11 @@ impl Session {
     }
 
     pub fn send(&mut self, request: Value) {
-        let mut line = serde_json::to_vec(&request).unwrap();
-        line.push(b'\n');
-        self.raw(&line);
+        self.send_bytes(request, &[]);
+    }
+
+    pub fn send_bytes(&mut self, request: Value, payload: &[u8]) {
+        self.raw(&encode_frame(&request, payload));
     }
 
     pub fn raw(&mut self, mut bytes: &[u8]) {
@@ -186,17 +188,13 @@ impl Session {
                     Ok(count) if stderr => self.stderr.extend_from_slice(&bytes[..count]),
                     Ok(count) => {
                         self.stdout.extend_from_slice(&bytes[..count]);
-                        self.pending.extend_from_slice(&bytes[..count]);
-                        while let Some(newline) =
-                            self.pending.iter().position(|&byte| byte == b'\n')
-                        {
-                            let line = self.pending.drain(..=newline).collect::<Vec<_>>();
-                            let answer = serde_json::from_slice(&line).unwrap_or_else(|error| {
-                                panic!(
-                                    "non-answer stdout: {error}: {}",
-                                    String::from_utf8_lossy(&line)
-                                )
-                            });
+                        self.decoder.push(&bytes[..count]);
+                        while let Some(frame) = self.decoder.next_frame::<Value>() {
+                            let frame = frame.expect("answer frame");
+                            let mut answer = frame.header;
+                            if !frame.payload.is_empty() {
+                                answer["payload"] = serde_json::json!(frame.payload);
+                            }
                             self.answers.push_back(answer);
                         }
                     }
@@ -238,19 +236,16 @@ impl Drop for Session {
     }
 }
 
-pub fn encoded(bytes: &[u8]) -> Value {
-    serde_json::to_value(ByteChunk::new(bytes.to_vec())).unwrap()
-}
-
 pub fn output(answers: &[Value], field: &str) -> Vec<u8> {
     answers
         .iter()
-        .filter_map(|answer| answer.get(field))
-        .flat_map(|value| {
-            serde_json::from_value::<ByteChunk>(value.clone())
+        .filter(|answer| answer.get(field).is_some())
+        .flat_map(|answer| {
+            answer["payload"]
+                .as_array()
                 .unwrap()
-                .bytes()
-                .to_vec()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u8)
         })
         .collect()
 }

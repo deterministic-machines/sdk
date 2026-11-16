@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from dvm.connection import Connection
 from dvm.errors import ConflictError, DvmError, SandboxEndedError
 from dvm.run_state import RunState
+from dvm.frame import FrameDecoder, MAX_HEADER, decode_output, encode_frame
 
 
 @dataclass(frozen=True)
@@ -87,7 +86,7 @@ class AsyncCommand:
 
 
 class SandboxSession:
-    MAX_LINE = 64 * 1024
+    PIECE_SIZE = 1024 * 1024
 
     def __init__(
         self,
@@ -104,7 +103,7 @@ class SandboxSession:
         self._input_offset = input_offset
         self._output_offset = 0
         self._stderr_offset = 0
-        self._pending = bytearray()
+        self._decoder = FrameDecoder()
         self._operations: dict[int, _Operation] = {}
         self._writer = asyncio.Lock()
         self._reader: Optional[asyncio.Task[None]] = None
@@ -143,9 +142,9 @@ class SandboxSession:
             await self._ready()
             operation = self._register()
             try:
-                for action in self._pieces(operation.id, "write", fields, data):
+                for action, payload in self._pieces("write", fields, data):
                     operation.check()
-                    await self._post(operation.id, action)
+                    await self._post(operation.id, action, payload)
             except BaseException:
                 self._operations.pop(operation.id, None)
                 raise
@@ -184,9 +183,9 @@ class SandboxSession:
     ) -> None:
         async with self._writer:
             await self._ready()
-            for action in self._pieces(operation.id, kind, fields, data):
+            for action, payload in self._pieces(kind, fields, data):
                 operation.check()
-                await self._post(operation.id, action)
+                await self._post(operation.id, action, payload)
 
     async def _begin(self, action: dict[str, Any]) -> _Operation:
         async with self._writer:
@@ -217,10 +216,9 @@ class SandboxSession:
 
     async def _append(self, chunk: bytes, *, end: bool = False) -> None:
         try:
-            state = await self._connection.json(
-                "POST", f"/sandboxes/{self._id}/input",
-                body={"offset": self._input_offset or 0,
-                      "chunk": base64.b64encode(chunk).decode("ascii"), "end": end},
+            state = await self._connection.input(
+                f"/sandboxes/{self._id}/input", chunk,
+                offset=self._input_offset or 0, end=end,
             )
         except ConflictError as refused:
             ended = await self._ended_error()
@@ -229,52 +227,42 @@ class SandboxSession:
             raise
         self._input_offset = state["length"]
 
-    @staticmethod
-    def _line(request_id: int, action: dict[str, Any]) -> bytes:
-        return (json.dumps({"id": request_id, **action}, ensure_ascii=False,
-                           separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+    async def _post(self, request_id: int, action: dict[str, Any], payload: bytes = b"") -> None:
+        header = {"id": request_id, **action}
+        frame = encode_frame(header, payload)
+        if len(frame) - len(payload) - 1 > MAX_HEADER:
+            raise DvmError("request header exceeds 65536 bytes")
+        for at in range(0, len(frame), 64 * 1024):
+            await self._append(frame[at:at + 64 * 1024])
 
-    async def _post(self, request_id: int, action: dict[str, Any]) -> None:
-        line = self._line(request_id, action)
-        if len(line) > self.MAX_LINE:
-            raise DvmError("request line exceeds 65536 bytes")
-        await self._append(line)
-
-    def _pieces(self, request_id: int, kind: str, fields: dict[str, Any], data: bytes):
-        last = {"last": False} if kind == "write" else {}
-        room = self.MAX_LINE - len(self._line(request_id, {kind: {**fields, "data": "", **last}}))
-        piece_size = (room // 4) * 3
-        if piece_size < 1:
-            raise DvmError("request line exceeds 65536 bytes")
-        for at in range(0, max(1, len(data)), piece_size):
-            piece = data[at:at + piece_size]
-            body = {**fields, "data": base64.b64encode(piece).decode("ascii")}
+    def _pieces(self, kind: str, fields: dict[str, Any], data: bytes):
+        for at in range(0, max(1, len(data)), self.PIECE_SIZE):
+            piece = data[at:at + self.PIECE_SIZE]
+            body = dict(fields)
             if kind == "write":
                 body["last"] = at + len(piece) == len(data)
-            yield {kind: body}
+            yield {kind: body}, piece
 
     async def _read_answers(self) -> None:
         try:
             while True:
-                output = await self._connection.json(
-                    "GET", f"/executions/{self._id}/output",
+                body = await self._connection.bytes(
+                    f"/executions/{self._id}/output",
                     params={"offset": self._output_offset, "stderr_offset": self._stderr_offset},
                 )
-                chunk = base64.b64decode(output["stdout"])
-                self._output_offset += len(chunk)
-                self._stderr_offset += len(base64.b64decode(output["stderr"]))
-                self._pending.extend(chunk)
-                while (end := self._pending.find(b"\n")) >= 0:
-                    line = self._pending[:end]
-                    del self._pending[:end + 1]
-                    self._dispatch(json.loads(line))
-                if not output["more"]:
+                page = decode_output(body)
+                self._output_offset += len(page.stdout)
+                self._stderr_offset += len(page.stderr)
+                self._decoder.push(page.stdout)
+                while (frame := self._decoder.next_frame()) is not None:
+                    self._dispatch(frame.header, frame.payload)
+                if not page.more and not page.cut:
                     code = await self._wait()
                     raise SandboxEndedError(self._id, RunState("exited", exit_code=code))
         except Exception as error:
             self._fail(error)
 
-    def _dispatch(self, answer: dict[str, Any]) -> None:
+    def _dispatch(self, answer: dict[str, Any], payload: bytes) -> None:
         if "error" in answer and "id" not in answer:
             self._fail_operations(DvmError(answer["error"]))
             return
@@ -286,16 +274,16 @@ class SandboxSession:
         elif "started" in answer:
             operation.started.set()
         elif "stdout" in answer:
-            operation.stdout.extend(base64.b64decode(answer["stdout"]))
+            operation.stdout.extend(payload)
         elif "stderr" in answer:
-            operation.stderr.extend(base64.b64decode(answer["stderr"]))
+            operation.stderr.extend(payload)
         elif "exited" in answer:
             operation.result = CommandResult(
                 answer["exited"]["code"], bytes(operation.stdout), bytes(operation.stderr),
             )
             operation.done.set()
         elif "data" in answer:
-            operation.data.extend(base64.b64decode(answer["data"]))
+            operation.data.extend(payload)
         elif "written" in answer or "end" in answer:
             operation.done.set()
         if operation.done.is_set():

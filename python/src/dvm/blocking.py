@@ -155,7 +155,7 @@ class Sandbox:
         return _run(self._sandbox.end())
 
     def output(self) -> Output:
-        """Raw process output: server answer lines for a command sandbox."""
+        """Raw process output: server answer frames for a command sandbox."""
         return _run(self._sandbox.output())
 
     def close(self) -> None:

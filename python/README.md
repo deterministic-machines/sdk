@@ -91,7 +91,7 @@ end if still active. A stopped recording does not replay.
   `SandboxFailedError` with dvm's reason. Pending operations raise these
   errors too if the sandbox ends before answering.
 - `output()` returns raw process output. For command sandboxes, `stdout`
-  is the server's JSON answer lines. For a supplied program, dvm combines
+  is the server's answer frames. For a supplied program, dvm combines
   its stdout and stderr in `stdout`; `stderr` is dvm's own diagnostics.
 - `pause`, `resume` and `stop` act on an active sandbox. A replay's verdict
   is `same`, `other_exit` (both codes) or `other_output` (the stream and the
@@ -185,3 +185,11 @@ nix develop -c bash -c 'cd python && uv run --no-project --with harbor --with py
 That test uses `tests/harbor-task`, a tiny task on `python:3.12-slim`. It
 checks the oracle reward, the artifact handoff to separate grading, and
 that both complete sandbox executions replay `same`.
+
+## Wire format
+
+Input bodies are raw bytes; output bodies and sandbox protocol messages
+use JSON headers followed by counted raw bytes. Stdin and file writes
+use payload pieces of at most 1 MiB. The SDK splits input across 64 KiB
+HTTP posts and follows output pages, advancing stdout and stderr offsets
+until `more` is false. See the [shared wire format](../README.md#bytes-on-the-wire).
