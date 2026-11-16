@@ -1,3 +1,4 @@
+import { encodeFrame } from "../src/frame.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Connection } from "../src/connection.ts";
@@ -36,7 +37,7 @@ test("output keeps every byte", async () => {
   const bytes = Uint8Array.from({ length: 256 }, (_, byte) => byte);
   const sandbox = sandboxAnswering((request) => {
     assert.equal(new URL(request.url).pathname, "/api/executions/5/output");
-    return Response.json({ stdout: Buffer.from(bytes).toString("base64"), stderr: "AA==" });
+    return new Response(encodeFrame({ stdout: bytes.length, stderr: 1, more: false, cut: false }, new Uint8Array([...bytes, 0])));
   });
   assert.deepEqual(await sandbox.output(), { stdout: bytes, stderr: new Uint8Array([0]) });
 });
@@ -74,4 +75,34 @@ test("setNetwork puts the mode and an allowlist's entries", async () => {
   await sandbox.setNetwork("allowlist", ["pypi.org", "8.8.8.0/24"]);
   assert.deepEqual(bodies, [{ mode: "none" }, { mode: "allowlist", allow: ["pypi.org", "8.8.8.0/24"] }]);
   await assert.rejects(sandbox.setNetwork("public", ["pypi.org"]), DvmError);
+});
+
+test("output follows pages and advances both offsets", async () => {
+  const data = new Uint8Array(4 * 1024 * 1024).fill(255);
+  const pages: [Uint8Array, Uint8Array, boolean][] = [
+    [data, data, true], [new Uint8Array([0, 255]), new Uint8Array([128]), false],
+  ];
+  let offset = 0, stderrOffset = 0;
+  const sandbox = sandboxAnswering((request) => {
+    // A sandbox still going: `more` stays true, and its output so far ends
+    // where a page isn't cut.
+    const query = new URL(request.url).searchParams;
+    if (offset === 0) assert.equal(query.size, 0);
+    else assert.deepEqual([Number(query.get("offset")), Number(query.get("stderr_offset"))], [offset, stderrOffset]);
+    const [stdout, stderr, cut] = pages.shift()!;
+    offset += stdout.length;
+    stderrOffset += stderr.length;
+    const payload = new Uint8Array(stdout.length + stderr.length);
+    payload.set(stdout);
+    payload.set(stderr, stdout.length);
+    return new Response(encodeFrame({ stdout: stdout.length, stderr: stderr.length, more: true, cut }, payload));
+  });
+  const output = await sandbox.output();
+  assert.equal(output.stdout.length, data.length + 2);
+  assert.equal(output.stderr.length, data.length + 1);
+  assert.deepEqual(output.stdout.slice(0, data.length), data);
+  assert.deepEqual(output.stderr.slice(0, data.length), data);
+  assert.deepEqual(output.stdout.slice(-2), new Uint8Array([0, 255]));
+  assert.deepEqual(output.stderr.slice(-1), new Uint8Array([128]));
+  assert.equal(pages.length, 0);
 });

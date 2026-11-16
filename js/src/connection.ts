@@ -79,13 +79,23 @@ export class Connection {
     return (text ? JSON.parse(text) : null) as T;
   }
 
+  async input<T>(path: string, body: Uint8Array, request: Request): Promise<T> {
+    const response = await this.#send("POST", path, request, body, withTimeout(request.signal, QUIET_LIMIT_MS));
+    return JSON.parse(await this.#read(() => response.text(), request.signal)) as T;
+  }
+
+  async bytes(path: string, request: Request = {}): Promise<Uint8Array> {
+    const response = await this.#send("GET", path, request, undefined, withTimeout(request.signal, QUIET_LIMIT_MS));
+    return new Uint8Array(await this.#read(() => response.arrayBuffer(), request.signal));
+  }
+
   /** The response, refused unless it's a success; `signal` is the call's,
    * and what else may end it. */
   async #send(
     method: string,
     path: string,
     request: Request,
-    body?: string,
+    body?: string | Uint8Array,
     signal = request.signal,
   ): Promise<Response> {
     const url = new URL(this.#api + path);
@@ -95,8 +105,9 @@ export class Connection {
     const headers: Record<string, string> = {};
     if (this.#key) headers.authorization = `Bearer ${this.#key}`;
     if (typeof body === "string") headers["content-type"] = "application/json";
+    if (body instanceof Uint8Array) headers["content-type"] = "application/octet-stream";
     const response = await this.#read(
-      () => this.#fetch(url, { method, headers, body, signal }),
+      () => this.#fetch(url, { method, headers, body: body instanceof Uint8Array ? new Uint8Array(body) : body, signal }),
       request.signal,
     );
     if (!response.ok) throw await refusalOf(response);

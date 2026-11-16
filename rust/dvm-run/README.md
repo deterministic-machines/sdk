@@ -103,10 +103,18 @@ tokio runtime; the runtime must remain alive for that cleanup to finish.
   Pending operations return the same errors if the sandbox ends before
   answering.
 - `output()` is raw process output: a command sandbox's stdout is the
-  server's JSON answer lines. For a supplied program, dvm merges its
+  server's answer frames. For a supplied program, dvm merges its
   stdout/stderr in `stdout`; `stderr` is dvm's own diagnostics.
 - `pause`, `resume`, `stop`, `state`, and connecting by id act as before.
   A replay verdict is `same`, `other_exit` (both codes), or `other_output`
   (stream and first differing byte). API types are in `dvm_run::api`.
 - The address is `DVM_API_URL`, the key is `DVM_API_KEY`, else the key
   `dvm-run login` saved for that address; both can be given in code.
+
+## Wire format
+
+Input bodies are raw bytes; output bodies and sandbox protocol messages
+use JSON headers followed by counted raw bytes. Stdin and file writes
+use payload pieces of at most 1 MiB. The SDK splits input across 64 KiB
+HTTP posts and follows output pages, advancing stdout and stderr offsets
+until `more` is false. See the [shared wire format](../../README.md#bytes-on-the-wire).

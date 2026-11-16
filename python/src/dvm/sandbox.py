@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Mapping, Optional, TypeVar
 
 from dvm.connection import Connection
 from dvm.errors import ConflictError, DvmError, SandboxEndedError, SandboxFailedError
-from dvm.execution import Output
+from dvm.execution import Output, read_output
 from dvm.run_state import RunState
 from dvm.sandbox_session import AsyncCommand, CommandResult, SandboxSession
 
@@ -197,9 +197,9 @@ class AsyncSandbox:
 
     async def output(self) -> Output:
         """What process 1 wrote so far. For a sandbox that takes commands,
-        stdout is the server's raw JSON answer lines, not command output.
+        stdout is the server's raw answer frames, not command output.
         """
-        return Output.from_api(await self._connection.json("GET", f"/executions/{self.id}/output"))
+        return await read_output(self._connection, f"/executions/{self.id}/output")
 
     async def close(self) -> None:
         """Closes its connection; the sandbox goes on."""

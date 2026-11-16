@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::IntoRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 
-use dvm_api::{ByteChunk, SandboxAnswerKind, SandboxWrite};
+use dvm_api::{SandboxAnswerKind, SandboxWrite};
 
 use crate::request_loop::Answers;
 
@@ -40,7 +40,7 @@ impl Files {
         }
     }
 
-    pub fn write(&mut self, id: u64, piece: SandboxWrite) -> io::Result<bool> {
+    pub fn write(&mut self, id: u64, piece: SandboxWrite, payload: &[u8]) -> io::Result<bool> {
         let mut write = match self.writes.remove(&id) {
             Some(write) if write.path == piece.path => write,
             Some(_) => {
@@ -61,7 +61,7 @@ impl Files {
                 path: piece.path,
             },
         };
-        write.file.write_all(piece.data.bytes())?;
+        write.file.write_all(payload)?;
         if !piece.last {
             self.writes.insert(id, write);
         } else if unsafe { libc::close(write.file.into_raw_fd()) } < 0 {
@@ -87,16 +87,17 @@ impl Files {
             return false;
         };
         let mut file = file;
-        let mut bytes = [0; 8192];
+        let mut bytes = [0; 256 * 1024];
         let answer = match file.read(&mut bytes) {
             Ok(0) => SandboxAnswerKind::End(true),
-            Ok(count) => SandboxAnswerKind::Data(ByteChunk::new(bytes[..count].to_vec())),
+            Ok(count) => {
+                answers.bytes(Some(id), SandboxAnswerKind::Data(true), &bytes[..count]);
+                return true;
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => return true,
             Err(error) => SandboxAnswerKind::Error(error.to_string()),
         };
-        if !matches!(answer, SandboxAnswerKind::Data(_)) {
-            self.reads.remove(&id);
-        }
+        self.reads.remove(&id);
         answers.push(Some(id), answer);
         true
     }

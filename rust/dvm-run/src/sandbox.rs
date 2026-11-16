@@ -248,13 +248,10 @@ impl Sandbox {
         self.session.as_ref().ok_or_else(no_commands)?.end().await
     }
 
-    /// Raw process output. A command sandbox's stdout is server answer lines.
+    /// Raw process output. A command sandbox's stdout is server answer frames.
     pub async fn output(&self) -> Result<RunOutput> {
         let path = format!("/executions/{}/output", self.id());
-        self.calls
-            .client
-            .json(Method::GET, &path, &[], None::<&()>)
-            .await
+        self.calls.client.output(&path).await
     }
 
     /// Ends input and waits at scope end, including cancellation. A paused

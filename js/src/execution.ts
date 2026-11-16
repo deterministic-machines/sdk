@@ -1,3 +1,4 @@
+import { decodeOutput, join } from "./frame.ts";
 import type { ApiExecution, ApiRun, ApiVerdict, ApiVerdictKind } from "./api-json.ts";
 import { type CallOptions, type ClientOptions, Connection } from "./connection.ts";
 import { ReplayEndedError } from "./errors.ts";
@@ -145,4 +146,21 @@ export interface Output {
 export function outputOf(output: { stdout: string; stderr: string }): Output {
   const decode = (encoded: string) => Uint8Array.from(atob(encoded), (byte) => byte.charCodeAt(0));
   return { stdout: decode(output.stdout), stderr: decode(output.stderr) };
+}
+
+/** What the run has written so far: the first page at once, then the rest
+ * of what each page stopped short of. */
+export async function readOutput(connection: Connection, path: string, options: CallOptions): Promise<Output> {
+  const stdout: Uint8Array[] = [], stderr: Uint8Array[] = [];
+  let offset = 0, stderrOffset = 0;
+  let query: Record<string, number> = {};
+  for (;;) {
+    const page = decodeOutput(await connection.bytes(path, { ...options, query }));
+    stdout.push(page.stdout);
+    stderr.push(page.stderr);
+    offset += page.stdout.length;
+    stderrOffset += page.stderr.length;
+    if (!page.cut) return { stdout: join(stdout), stderr: join(stderr) };
+    query = { offset, stderr_offset: stderrOffset };
+  }
 }

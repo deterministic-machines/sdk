@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use serde_json::json;
-use support::{Session, encoded, ordered, output};
+use support::{Session, ordered, output};
 
 fn session(dvm: &std::ffi::OsStr, server: &Path, log: Option<&Path>) -> Session {
     let mut command = Command::new(dvm);
@@ -39,7 +39,7 @@ fn exercise(server: &mut Session) {
         commands[answer["id"].as_u64().unwrap() as usize - 3].push(answer);
     }
     for id in [4, 3] {
-        server.send(json!({"id":id,"stdin":{"data":encoded(&[0, 255, id as u8]),"close":true}}));
+        server.send_bytes(json!({"id":id,"stdin":{"close":true}}), &[0, 255, id as u8]);
     }
     let mut exited = 0;
     while exited < 2 {
@@ -58,9 +58,10 @@ fn exercise(server: &mut Session) {
     let mut answers = vec![started];
     answers.extend(server.through_exit(5));
     ordered(&answers, 143);
-    server.send(json!({"id":6,"write":{"path":"/tmp/session","data":encoded(b"first")}}));
-    server.send(
-        json!({"id":6,"write":{"path":"/tmp/session","data":encoded(&[0, 255]),"last":true}}),
+    server.send_bytes(json!({"id":6,"write":{"path":"/tmp/session"}}), b"first");
+    server.send_bytes(
+        json!({"id":6,"write":{"path":"/tmp/session","last":true}}),
+        &[0, 255],
     );
     assert_eq!(server.next(), json!({"id":6,"written":true}));
     server.send(json!({"id":7,"read":{"path":"/tmp/session"}}));

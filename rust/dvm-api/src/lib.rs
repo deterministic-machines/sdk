@@ -10,6 +10,7 @@ mod api_key;
 mod capacity;
 mod cli_login;
 mod execution;
+mod frame;
 mod image_reference;
 mod run;
 mod sandbox;
@@ -23,6 +24,9 @@ pub use api_key::{ApiKey, CreatedApiKey, NewApiKey};
 pub use capacity::Capacity;
 pub use cli_login::{CliLogin, CollectCliLogin, NewCliLogin, StartedCliLogin};
 pub use execution::Execution;
+pub use frame::{
+    Frame, FrameDecoder, FrameError, MAX_HEADER, MAX_PAYLOAD, decode_frame, encode_frame,
+};
 pub use image_reference::{ImageReference, InvalidImageReference};
 pub use run::{
     ByteChunk, InvalidRunAction, OutputStream, ReplayVerdict, Run, RunAction, RunId, RunOutput,
@@ -76,7 +80,6 @@ pub fn export_typescript(config: &ts_rs::Config) -> Result<(), ts_rs::ExportErro
     RunOutput::export_all(config)?;
     SandboxInput::export_all(config)?;
     SandboxInputState::export_all(config)?;
-    OutputAfter::export_all(config)?;
     RunState::export_all(config)?;
     Sandbox::export_all(config)?;
     SandboxRequest::export_all(config)?;
@@ -111,7 +114,7 @@ mod typescript_tests {
         }
         for (name, fields) in [
             ("SandboxRun", &["env", "cwd", "stdin", "user"][..]),
-            ("SandboxStdin", &["data", "close"][..]),
+            ("SandboxStdin", &["close"][..]),
             ("SandboxWrite", &["mode", "last"][..]),
             ("SandboxAnswer", &["id"][..]),
         ] {

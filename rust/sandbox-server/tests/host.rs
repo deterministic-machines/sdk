@@ -3,7 +3,7 @@ mod support;
 use std::os::unix::fs::PermissionsExt;
 
 use serde_json::json;
-use support::{Session, encoded, ordered, output};
+use support::{Session, ordered, output};
 
 #[test]
 fn argv_and_script_keep_streams_and_exit_codes() {
@@ -36,8 +36,8 @@ fn binary_output_and_piecewise_stdin() {
     server.send(
         json!({"id":1,"run":{"argv":["/bin/sh","-c","printf '\\377\\000'; cat"],"stdin":true}}),
     );
-    server.send(json!({"id":1,"stdin":{"data":encoded(&[0, 255, 128])}}));
-    server.send(json!({"id":1,"stdin":{"data":encoded(b"tail"),"close":true}}));
+    server.send_bytes(json!({"id":1,"stdin":{}}), &[0, 255, 128]);
+    server.send_bytes(json!({"id":1,"stdin":{"close":true}}), b"tail");
     let answers = server.through_exit(1);
     ordered(&answers, 0);
     assert_eq!(
@@ -142,10 +142,10 @@ fn queued_stdin_does_not_hold_up_other_requests() {
     server.send(json!({"id":1,"run":{"argv":["/bin/sh","-c","while [ ! -f \"$GATE\" ]; do :; done; cat"],"env":{"GATE":gate},"stdin":true}}));
     let bytes = (0..256 * 1024).map(|index| index as u8).collect::<Vec<_>>();
     for piece in bytes.chunks(24000) {
-        server.send(json!({"id":1,"stdin":{"data":encoded(piece)}}));
+        server.send_bytes(json!({"id":1,"stdin":{}}), piece);
     }
     server.send(json!({"id":1,"stdin":{"close":true}}));
-    server.send(json!({"id":2,"write":{"path":gate,"data":"","last":true}}));
+    server.send_bytes(json!({"id":2,"write":{"path":gate,"last":true}}), b"");
     let mut command = Vec::new();
     let mut written = false;
     let mut exited = false;
@@ -197,7 +197,7 @@ fn two_commands_make_progress_independently() {
         commands[answer["id"].as_u64().unwrap() as usize - 1].push(answer);
     }
     for id in [2, 1] {
-        server.send(json!({"id":id,"stdin":{"data":encoded(&[id as u8]),"close":true}}));
+        server.send_bytes(json!({"id":id,"stdin":{"close":true}}), &[id as u8]);
     }
     let mut exited = 0;
     while exited < 2 {
@@ -236,10 +236,10 @@ fn files_are_chunked_keep_modes_and_report_errors() {
     let path = directory.path().join("file");
     std::fs::write(&path, "old contents").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let bytes = (0..256 * 1024).map(|index| index as u8).collect::<Vec<_>>();
+    let bytes = (0..768 * 1024).map(|index| index as u8).collect::<Vec<_>>();
     let mut server = Session::host();
     for (index, piece) in bytes.chunks(24000).enumerate() {
-        server.send(json!({"id":1,"write":{"path":path,"mode":420,"data":encoded(piece),"last":(index + 1) * 24000 >= bytes.len()}}));
+        server.send_bytes(json!({"id":1,"write":{"path":path,"mode":420,"last":(index + 1) * 24000 >= bytes.len()}}), piece);
     }
     assert_eq!(server.next(), json!({"id":1,"written":true}));
     assert_eq!(
@@ -254,7 +254,8 @@ fn files_are_chunked_keep_modes_and_report_errors() {
             assert_eq!(answer["end"], true);
             break;
         }
-        assert!(answer.get("data").is_some());
+        assert_eq!(answer["data"], true);
+        assert!(answer["payload"].as_array().unwrap().len() <= 256 * 1024);
         answers.push(answer);
     }
     assert!(answers.len() > 1);
@@ -285,13 +286,16 @@ fn files_are_chunked_keep_modes_and_report_errors() {
             "{answer}"
         );
     }
-    server.send(json!({"id":9,"write":{"path":directory.path().join("missing/child"),"data":"","last":true}}));
+    server.send_bytes(
+        json!({"id":9,"write":{"path":directory.path().join("missing/child"),"last":true}}),
+        b"",
+    );
     assert!(server.next().get("error").is_some());
     let partial = directory.path().join("partial");
-    server.send(json!({"id":10,"write":{"path":partial,"data":encoded(b"kept")}}));
-    server.send(json!({"id":10,"write":{"path":partial,"data":"bad base64","last":true}}));
+    server.send_bytes(json!({"id":10,"write":{"path":partial}}), b"kept");
+    server.send(json!({"id":10,"write":{"path":partial,"mode":"bad mode","last":true}}));
     assert!(server.next().get("error").is_some());
-    server.send(json!({"id":10,"write":{"path":partial,"data":"","last":true}}));
+    server.send_bytes(json!({"id":10,"write":{"path":partial,"last":true}}), b"");
     assert!(
         server.next()["error"]
             .as_str()
@@ -303,18 +307,17 @@ fn files_are_chunked_keep_modes_and_report_errors() {
 
 #[test]
 fn unidentified_errors_abort_every_open_write() {
-    for bad_line in 0..3 {
+    for bad_line in 0..2 {
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("first");
         let second = directory.path().join("second");
         let mut server = Session::host();
         for (id, path) in [(1, &first), (2, &second)] {
-            server.send(json!({"id":id,"write":{"path":path,"data":"AAAA"}}));
+            server.send_bytes(json!({"id":id,"write":{"path":path}}), &[0; 3]);
         }
         match bad_line {
             0 => server.raw(b"not JSON\n"),
-            1 => server.send(json!({"write":{"path":first,"data":"CCCC"}})),
-            _ => server.send(json!({"id":1,"write":{"path":first,"data":"A".repeat(65536)}})),
+            _ => server.send_bytes(json!({"write":{"path":first}}), &[8; 3]),
         }
         let mut ids = Vec::new();
         for _ in 0..3 {
@@ -325,11 +328,11 @@ fn unidentified_errors_abort_every_open_write() {
         ids.sort();
         assert_eq!(ids, [None, Some(1), Some(2)]);
         for (id, path) in [(1, &first), (2, &second)] {
-            server.send(json!({"id":id,"write":{"path":path,"data":"CCCC","last":true}}));
+            server.send_bytes(json!({"id":id,"write":{"path":path,"last":true}}), &[8; 3]);
             assert!(server.next().get("error").is_some());
             assert_eq!(std::fs::read(path).unwrap(), [0; 3]);
         }
-        server.send(json!({"id":3,"write":{"path":first,"data":"CCCC","last":true}}));
+        server.send_bytes(json!({"id":3,"write":{"path":first,"last":true}}), &[8; 3]);
         assert_eq!(server.next(), json!({"id":3,"written":true}));
     }
 }
@@ -339,20 +342,18 @@ fn regular_stdin_reports_unterminated_input_once_and_stops() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("partial");
     let input = directory.path().join("requests");
-    let mut bytes =
-        serde_json::to_vec(&json!({"id":1,"write":{"path":path,"data":"AAAA"}})).unwrap();
-    bytes.extend_from_slice(b"\n{");
+    let mut bytes = dvm_api::encode_frame(&json!({"id":1,"write":{"path":path}}), &[0; 3]);
+    bytes.extend_from_slice(b"{");
     std::fs::write(&input, bytes).unwrap();
     let mut server = Session::host_with_stdin(std::fs::File::open(input).unwrap());
     assert!(server.finish().success(), "{}", server.diagnostics());
-    let answers: Vec<serde_json::Value> = server
-        .stdout
-        .split(|&byte| byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_slice(line).unwrap())
+    let mut decoder = dvm_api::FrameDecoder::default();
+    decoder.push(&server.stdout);
+    let answers: Vec<serde_json::Value> = std::iter::from_fn(|| decoder.next_frame())
+        .map(|frame| frame.unwrap().header)
         .collect();
     assert_eq!(answers.len(), 2, "{answers:?}");
-    assert_eq!(answers[0], json!({"error":"unterminated request line"}));
+    assert_eq!(answers[0], json!({"error":"the frame ends early"}));
     assert_eq!(answers[1]["id"], 1);
     assert!(answers[1].get("error").is_some());
     assert_eq!(std::fs::read(path).unwrap(), [0; 3]);
@@ -396,8 +397,9 @@ fn a_tracing_stop_keeps_the_command_live_for_signals() {
         std::fs::read_to_string(format!("/proc/{pid}/status"))
             .is_ok_and(|status| status.contains("State:\tt"))
     });
-    server.send(
-        json!({"id":2,"write":{"path":directory.path().join("barrier"),"data":"","last":true}}),
+    server.send_bytes(
+        json!({"id":2,"write":{"path":directory.path().join("barrier"),"last":true}}),
+        b"",
     );
     assert_eq!(server.next(), json!({"id":2,"written":true}));
     server.send(json!({"id":1,"signal":9}));
@@ -419,15 +421,11 @@ fn bad_requests_are_answered_and_the_server_continues() {
         server.raw(line);
         assert!(server.next().get("error").is_some());
     }
-    let mut long = vec![b'x'; 65537];
-    long.push(b'\n');
-    server.raw(&long);
-    assert!(server.next()["error"].as_str().unwrap().contains("65536"));
     server.send(json!({"id":1,"run":{"argv":["/bin/sh","-c","exit 0"]}}));
     ordered(&server.through_exit(1), 0);
     server.send(json!({"id":1,"run":{"argv":["/bin/sh","-c","exit 0"]}}));
     assert!(server.next().get("error").is_some());
-    server.send(json!({"id":1,"stdin":{"data":encoded(b"ignored"),"close":true}}));
+    server.send_bytes(json!({"id":1,"stdin":{"close":true}}), b"ignored");
     server.send(json!({"id":1,"signal":15}));
     server.send(json!({"id":2,"run":{"argv":["/bin/sh","-c","printf alive"]}}));
     let answers = server.through_exit(2);
@@ -442,16 +440,16 @@ fn operation_ids_increase_and_old_input_is_ignored() {
     let mut server = Session::host();
     server.send(json!({"id":0,"run":{"argv":["/bin/sh","-c","exit 0"]}}));
     ordered(&server.through_exit(0), 0);
-    server.send(json!({"id":10,"write":{"path":path,"data":encoded(b"first")}}));
+    server.send_bytes(json!({"id":10,"write":{"path":path}}), b"first");
     server.send(json!({"id":20,"run":{"argv":["/bin/sh","-c","exit 0"]}}));
     ordered(&server.through_exit(20), 0);
-    server.send(json!({"id":10,"write":{"path":path,"data":encoded(b"last"),"last":true}}));
+    server.send_bytes(json!({"id":10,"write":{"path":path,"last":true}}), b"last");
     assert_eq!(server.next(), json!({"id":10,"written":true}));
     assert_eq!(std::fs::read(&path).unwrap(), b"firstlast");
     for request in [
         json!({"id":19,"run":{"argv":["/bin/sh","-c","exit 0"]}}),
         json!({"id":20,"read":{"path":path}}),
-        json!({"id":10,"write":{"path":path,"data":"","last":true}}),
+        json!({"id":10,"write":{"path":path,"last":true}}),
     ] {
         let id = request["id"].clone();
         server.send(request);
@@ -461,7 +459,7 @@ fn operation_ids_increase_and_old_input_is_ignored() {
         );
     }
     for id in [0, 1, 10, 19, 20] {
-        server.send(json!({"id":id,"stdin":{"data":encoded(b"ignored"),"close":true}}));
+        server.send_bytes(json!({"id":id,"stdin":{"close":true}}), b"ignored");
         server.send(json!({"id":id,"signal":15}));
     }
     for request in [json!({"id":21,"stdin":{}}), json!({"id":21,"signal":15})] {
@@ -519,4 +517,46 @@ fn eof_and_termination_kill_commands_and_exit_zero() {
         });
         assert!(server.stderr.is_empty());
     }
+}
+
+#[test]
+fn oversized_frames_abort_writes_and_end_request_handling() {
+    for bad in [
+        vec![b' '; dvm_api::MAX_HEADER + 1],
+        format!("{{\"bytes\":{}}}\n", dvm_api::MAX_PAYLOAD + 1).into_bytes(),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let partial = directory.path().join("partial");
+        let later = directory.path().join("later");
+        let input = directory.path().join("input");
+        let mut stream = dvm_api::encode_frame(&json!({"id":1,"write":{"path":partial}}), b"kept");
+        stream.extend(bad);
+        stream.extend(dvm_api::encode_frame(
+            &json!({"id":2,"write":{"path":later,"last":true}}),
+            b"lost",
+        ));
+        std::fs::write(&input, stream).unwrap();
+        let mut server = Session::host_with_stdin(std::fs::File::open(input).unwrap());
+        assert!(server.finish().success(), "{}", server.diagnostics());
+        assert!(server.next().get("error").is_some());
+        assert_eq!(server.next()["id"], 1);
+        assert_eq!(std::fs::read(partial).unwrap(), b"kept");
+        assert!(!later.exists());
+    }
+}
+
+#[test]
+fn a_bad_typed_header_discards_its_binary_payload_and_continues() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("file");
+    let mut server = Session::host();
+    server.send_bytes(json!({"id":1,"write":{"path":path}}), b"kept");
+    server.send_bytes(
+        json!({"id":1,"write":{"path":path,"mode":"bad"}}),
+        b"\n{not a header}\n\xff",
+    );
+    assert_eq!(server.next()["id"], 1);
+    server.send_bytes(json!({"id":2,"write":{"path":path,"last":true}}), b"whole");
+    assert_eq!(server.next(), json!({"id":2,"written":true}));
+    assert_eq!(std::fs::read(path).unwrap(), b"whole");
 }

@@ -11,6 +11,7 @@ from typing import Any, Mapping, Optional
 from dvm.connection import Connection
 from dvm.errors import ReplayEndedError
 from dvm.run_state import RunState
+from dvm.frame import decode_output
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,20 @@ class Output:
     @classmethod
     def from_api(cls, output: Mapping[str, Any]) -> Output:
         return cls(base64.b64decode(output["stdout"]), base64.b64decode(output["stderr"]))
+
+
+async def read_output(connection: Connection, path: str) -> Output:
+    """What the run has written so far: the first page at once, then the
+    rest of what each page stopped short of."""
+    stdout, stderr = bytearray(), bytearray()
+    params: dict[str, int] = {}
+    while True:
+        page = decode_output(await connection.bytes(path, params=params))
+        stdout.extend(page.stdout)
+        stderr.extend(page.stderr)
+        if not page.cut:
+            return Output(bytes(stdout), bytes(stderr))
+        params = {"offset": len(stdout), "stderr_offset": len(stderr)}
 
 
 @dataclass(frozen=True)

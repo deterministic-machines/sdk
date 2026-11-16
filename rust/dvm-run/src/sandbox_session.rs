@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
+use dvm_api::encode_frame;
 use dvm_api::{
-    ByteChunk, OutputAfter, RunState, SandboxAnswer, SandboxAnswerKind, SandboxInput,
+    FrameDecoder, MAX_HEADER, RunState, SandboxAnswer, SandboxAnswerKind, SandboxInput,
     SandboxInputState, SandboxRead, SandboxRequest, SandboxRequestAction, SandboxRun, SandboxStdin,
     SandboxWrite,
 };
-use reqwest::Method;
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio::task::AbortHandle;
 
@@ -77,7 +77,7 @@ struct InputWriter {
     ended: bool,
 }
 
-/// Offsets, line encoding, and dispatch live only here. Cloned sandbox
+/// Offsets, frame encoding, and dispatch live only here. Cloned sandbox
 /// handles share this session, while a separately connected handle does not.
 #[derive(Debug)]
 pub(crate) struct Session {
@@ -88,7 +88,7 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    const MAX_LINE: usize = 65536;
+    const PIECE_SIZE: usize = 1024 * 1024;
 
     pub(crate) fn new(calls: SandboxCalls, offset: Option<u64>) -> Arc<Self> {
         Arc::new(Self {
@@ -133,14 +133,8 @@ impl Session {
             let mut writer = self.writer.lock().await;
             self.ready(&mut writer, false).await?;
             let operation = self.register(writer.offset.unwrap())?;
-            let empty = SandboxRequestAction::Write(SandboxWrite {
-                path: path.clone(),
-                mode,
-                data: ByteChunk::default(),
-                last: false,
-            });
             let result = async {
-                let size = Self::piece_size(operation.id, &empty)?;
+                let size = Self::PIECE_SIZE;
                 let count = bytes.len().max(1).div_ceil(size);
                 for index in 0..count {
                     operation.check()?;
@@ -151,10 +145,9 @@ impl Session {
                     let action = SandboxRequestAction::Write(SandboxWrite {
                         path: path.clone(),
                         mode,
-                        data: ByteChunk::new(data.to_vec()),
                         last: index + 1 == count,
                     });
-                    self.post(&mut writer, operation.id, action).await?;
+                    self.post(&mut writer, operation.id, action, data).await?;
                 }
                 Ok(())
             }
@@ -189,6 +182,7 @@ impl Session {
             &mut writer,
             operation.id,
             SandboxRequestAction::Signal(number),
+            &[],
         )
         .await
     }
@@ -207,15 +201,12 @@ impl Session {
                 .post(
                     &mut writer,
                     operation.id,
-                    SandboxRequestAction::Stdin(SandboxStdin {
-                        close: true,
-                        ..SandboxStdin::default()
-                    }),
+                    SandboxRequestAction::Stdin(SandboxStdin { close: true }),
+                    &[],
                 )
                 .await;
         }
-        let empty = SandboxRequestAction::Stdin(SandboxStdin::default());
-        let size = Self::piece_size(operation.id, &empty)?;
+        let size = Self::PIECE_SIZE;
         for index in 0..bytes.len().max(1).div_ceil(size) {
             operation.check()?;
             let at = index * size;
@@ -225,10 +216,8 @@ impl Session {
             self.post(
                 &mut writer,
                 operation.id,
-                SandboxRequestAction::Stdin(SandboxStdin {
-                    data: ByteChunk::new(data.to_vec()),
-                    close: false,
-                }),
+                SandboxRequestAction::Stdin(SandboxStdin { close: false }),
+                data,
             )
             .await?;
         }
@@ -251,7 +240,7 @@ impl Session {
         let mut writer = self.writer.lock().await;
         self.ready(&mut writer, false).await?;
         let operation = self.register(writer.offset.unwrap())?;
-        if let Err(error) = self.post(&mut writer, operation.id, action).await {
+        if let Err(error) = self.post(&mut writer, operation.id, action, &[]).await {
             self.operations
                 .lock()
                 .unwrap()
@@ -297,27 +286,18 @@ impl Session {
     async fn append(&self, writer: &mut InputWriter, bytes: Vec<u8>, end: bool) -> Result<()> {
         let input = SandboxInput {
             offset: writer.offset.unwrap_or(0),
-            chunk: ByteChunk::new(bytes),
             end,
         };
         let state: SandboxInputState = self
             .calls
-            .while_live(self.calls.client.json(
-                Method::POST,
+            .while_live(self.calls.client.input(
                 &format!("{}/input", self.calls.path),
-                &[],
-                Some(&input),
+                &input,
+                bytes,
             ))
             .await?;
         writer.offset = Some(state.length);
         Ok(())
-    }
-
-    fn line(id: u64, action: SandboxRequestAction) -> Result<Vec<u8>> {
-        let mut bytes = serde_json::to_vec(&SandboxRequest { id, action })
-            .map_err(|error| Error::Unexpected(error.to_string()))?;
-        bytes.push(b'\n');
-        Ok(bytes)
     }
 
     async fn post(
@@ -325,66 +305,48 @@ impl Session {
         writer: &mut InputWriter,
         id: u64,
         action: SandboxRequestAction,
+        payload: &[u8],
     ) -> Result<()> {
-        let bytes = Self::line(id, action)?;
-        if bytes.len() > Self::MAX_LINE {
-            return Err(Self::oversized());
+        let bytes = encode_frame(&SandboxRequest { id, action }, payload);
+        if bytes.len() - payload.len() - 1 > MAX_HEADER {
+            return Err(Error::SandboxRequest {
+                reason: "request header exceeds 65536 bytes".into(),
+            });
         }
-        self.append(writer, bytes, false).await
-    }
-
-    fn piece_size(id: u64, action: &SandboxRequestAction) -> Result<usize> {
-        let envelope = Self::line(id, action.clone())?.len();
-        Self::MAX_LINE
-            .checked_sub(envelope)
-            .map(|room| room / 4 * 3)
-            .filter(|size| *size > 0)
-            .ok_or_else(Self::oversized)
-    }
-    fn oversized() -> Error {
-        Error::SandboxRequest {
-            reason: "request line exceeds 65536 bytes".into(),
+        for chunk in bytes.chunks(SandboxInput::MAX_CHUNK_BYTES) {
+            self.append(writer, chunk.to_vec(), false).await?;
         }
+        Ok(())
     }
 
     async fn read_answers(calls: SandboxCalls, session: Weak<Self>) {
         let result = async {
             let (mut offset, mut stderr_offset) = (0u64, 0u64);
-            let mut pending = Vec::new();
+            let mut decoder = FrameDecoder::default();
             loop {
-                let query = [
-                    ("offset", offset.to_string()),
-                    ("stderr_offset", stderr_offset.to_string()),
-                ];
-                let output: OutputAfter = calls
+                let output = calls
                     .client
-                    .json(
-                        Method::GET,
+                    .output_after(
                         &format!("/executions/{}/output", calls.id),
-                        &query,
-                        None::<&()>,
+                        offset,
+                        stderr_offset,
                     )
                     .await?;
                 offset += output.output.stdout.bytes().len() as u64;
                 stderr_offset += output.output.stderr.bytes().len() as u64;
-                pending.extend_from_slice(output.output.stdout.bytes());
+                decoder.push(output.output.stdout.bytes());
                 {
                     let Some(session) = session.upgrade() else {
                         return Ok(());
                     };
-                    let mut start = 0;
-                    while let Some(end) = pending[start..].iter().position(|byte| *byte == b'\n') {
-                        let end = start + end;
-                        let answer: SandboxAnswer = serde_json::from_slice(&pending[start..end])
-                            .map_err(|error| {
-                                Error::Unexpected(format!("sandbox answer: {error}"))
-                            })?;
-                        session.dispatch(answer);
-                        start = end + 1;
+                    while let Some(frame) = decoder.next_frame::<SandboxAnswer>() {
+                        let frame = frame.map_err(|error| {
+                            Error::Unexpected(format!("sandbox answer: {error}"))
+                        })?;
+                        session.dispatch(frame.header, &frame.payload);
                     }
-                    pending.drain(..start);
                 }
-                if !output.more {
+                if !output.more && !output.cut {
                     let code = calls.wait().await?;
                     return Err(Error::ended(calls.id, RunState::Exited { code }));
                 }
@@ -398,7 +360,7 @@ impl Session {
         }
     }
 
-    fn dispatch(&self, answer: SandboxAnswer) {
+    fn dispatch(&self, answer: SandboxAnswer, payload: &[u8]) {
         let mut operations = self.operations.lock().unwrap();
         if answer.id.is_none() {
             if let SandboxAnswerKind::Error(reason) = answer.answer {
@@ -414,13 +376,9 @@ impl Session {
         operation.send_modify(|state| {
             match answer.answer {
                 SandboxAnswerKind::Started(_) => state.started = true,
-                SandboxAnswerKind::Stdout(bytes) => {
-                    state.output.stdout.extend_from_slice(bytes.bytes())
-                }
-                SandboxAnswerKind::Stderr(bytes) => {
-                    state.output.stderr.extend_from_slice(bytes.bytes())
-                }
-                SandboxAnswerKind::Data(bytes) => state.data.extend_from_slice(bytes.bytes()),
+                SandboxAnswerKind::Stdout(_) => state.output.stdout.extend_from_slice(payload),
+                SandboxAnswerKind::Stderr(_) => state.output.stderr.extend_from_slice(payload),
+                SandboxAnswerKind::Data(_) => state.data.extend_from_slice(payload),
                 SandboxAnswerKind::Exited(exit) => {
                     state.output.exit_code = exit.code;
                     state.done = true;

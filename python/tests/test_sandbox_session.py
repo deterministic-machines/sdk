@@ -1,21 +1,24 @@
 """Session ordering over fake byte streams, without clocks or sleeps."""
 import asyncio
-import base64
-import json
 
 import httpx
 import pytest
 
 from dvm import AsyncSandbox, DvmError, SandboxEndedError, SandboxFailedError
 from dvm.connection import Connection
+from dvm.frame import FrameDecoder, encode_frame
 
 
 def line(answer):
-    return json.dumps(answer).encode() + b"\n"
+    answer = dict(answer)
+    payload = answer.pop("payload", b"")
+    return encode_frame(answer, payload)
 
 
 class Streams:
     def __init__(self, *, length=0, state=None):
+        self.decoder = FrameDecoder()
+        self.base = length
         self.length = length
         self.state = state or {"kind": "exited", "code": 0}
         self.requests = asyncio.Queue()
@@ -27,23 +30,31 @@ class Streams:
 
     async def answer(self, request):
         if request.method == "POST":
-            body = json.loads(request.content)
-            data = base64.b64decode(body["chunk"])
+            assert request.headers["content-type"] == "application/octet-stream"
+            data = request.content
+            offset = int(request.url.params["offset"])
+            end = request.url.params["end"] == "true"
             if not data:
-                assert body["offset"] == 0
+                assert offset == 0
                 self.probes += 1
             else:
-                assert body["offset"] == self.length
-                assert len(data) <= 65536 and data.endswith(b"\n")
+                assert offset == self.length
+                assert len(data) <= 65536
                 self.length += len(data)
-                await self.requests.put((body["offset"], json.loads(data)))
-            return httpx.Response(200, json={"length": self.length, "ended": body["end"]})
+                self.decoder.push(data)
+                while (frame := self.decoder.next_frame()) is not None:
+                    assert len(frame.payload) <= 1024 * 1024
+                    request = frame.header
+                    if frame.payload:
+                        request["payload"] = frame.payload
+                    await self.requests.put((self.base + frame.span.start, request))
+            return httpx.Response(200, json={"length": self.length, "ended": end})
         if request.url.path.endswith("/output"):
             assert int(request.url.params["offset"]) == self.output_offset
             chunk, more = await self.chunks.get()
             self.output_offset += len(chunk)
-            return httpx.Response(200, json={"stdout": base64.b64encode(chunk).decode(),
-                                           "stderr": "", "more": more})
+            return httpx.Response(200, content=encode_frame({"stdout": len(chunk), "stderr": 0, "more": more, "cut": False}, chunk),
+                                  headers={"Content-Type": "application/octet-stream"})
         return httpx.Response(200, json={"run": {"state": self.state}})
 
     async def emit(self, *answers, more=True):
@@ -71,24 +82,24 @@ def test_split_lines_and_interleaved_commands_use_the_input_offsets():
         assert request["run"]["user"] == "agent"
         answers = (line({"id": first_id, "started": {"pid": 1, "argv": ["first"]}})
                    + line({"id": second_id, "started": {"pid": 2, "argv": ["sh", "-c", "second"]}})
-                   + line({"id": first_id, "stdout": "YQ=="}))
+                   + line({"id": first_id, "stdout": True, "payload": b"a"}))
         await streams.chunks.put((answers[:-4], True))
         await streams.chunks.put((answers[-4:], True))
         a, b = await asyncio.gather(first, second)
-        data = bytes(range(256)) * 400
+        data = bytes(range(256)) * 9000
         writing = asyncio.create_task(a.write_stdin(data))
         received = bytearray()
         while len(received) < len(data):
             _, request = await streams.requests.get()
             assert request["id"] == first_id
-            received.extend(base64.b64decode(request["stdin"]["data"]))
+            received.extend(request["payload"])
         await writing
         assert received == data
         await a.close_stdin()
         _, request = await streams.requests.get()
         assert request == {"id": first_id, "stdin": {"close": True}}
-        await streams.emit({"id": second_id, "stdout": "Yg=="},
-                           {"id": first_id, "stderr": "ZXJy"},
+        await streams.emit({"id": second_id, "stdout": True, "payload": b"b"},
+                           {"id": first_id, "stderr": True, "payload": b"err"},
                            {"id": second_id, "exited": {"code": 3}},
                            {"id": first_id, "exited": {"code": 0}})
         ra, rb = await asyncio.gather(a.wait(), b.wait())
@@ -134,7 +145,7 @@ def test_errors_dispatch_to_one_or_all_open_operations(failure):
 def test_files_are_cut_into_bounded_pieces_and_read_back():
     async def run():
         streams = Streams()
-        data = bytes(range(256)) * 600
+        data = bytes(range(256)) * 9000
         writing = asyncio.create_task(streams.sandbox.write_file("/tmp/a", data, mode=0o600))
         received = bytearray()
         write_id = None
@@ -145,7 +156,7 @@ def test_files_are_cut_into_bounded_pieces_and_read_back():
             assert request["id"] == write_id
             piece = request["write"]
             assert (piece["path"], piece["mode"]) == ("/tmp/a", 0o600)
-            received.extend(base64.b64decode(piece["data"]))
+            received.extend(request["payload"])
             if piece["last"]:
                 break
         assert received == data
@@ -156,7 +167,7 @@ def test_files_are_cut_into_bounded_pieces_and_read_back():
         assert request == {"id": read_id, "read": {"path": "/tmp/a"}}
         assert read_id > write_id
         for at in range(0, len(data), 8000):
-            await streams.emit({"id": read_id, "data": base64.b64encode(data[at:at + 8000]).decode()})
+            await streams.emit({"id": read_id, "data": True, "payload": data[at:at + 8000]})
         await streams.emit({"id": read_id, "end": True})
         assert await reading == data
         await streams.sandbox.close()
@@ -194,12 +205,13 @@ def test_scope_cleanup_ends_input_or_stops_as_appropriate(kind):
         async def answer(request):
             nonlocal state
             if request.method == "GET" and request.url.path.endswith("/output"):
-                return httpx.Response(200, json={"stdout": "", "stderr": "", "more": False})
+                return httpx.Response(200, content=encode_frame({"stdout": 0, "stderr": 0, "more": False, "cut": False}))
             if request.method == "GET":
                 return httpx.Response(200, json={"run": {"state": state}})
             calls.append(request.url.path)
             if request.url.path.endswith("/input"):
-                assert json.loads(request.content) == {"offset": 0, "chunk": "", "end": True}
+                assert not request.content
+                assert dict(request.url.params) == {"offset": "0", "end": "true"}
                 state = {"kind": "exited", "code": 0}
                 return httpx.Response(200, json={"length": 0, "ended": True})
             state = {"kind": "stopped"}

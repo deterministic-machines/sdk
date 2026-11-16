@@ -5,8 +5,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 
 use dvm_api::{
-    ByteChunk, SandboxAnswerKind, SandboxExited, SandboxProgram, SandboxRun, SandboxStarted,
-    SandboxStdin,
+    SandboxAnswerKind, SandboxExited, SandboxProgram, SandboxRun, SandboxStarted, SandboxStdin,
 };
 
 use crate::command_user::CommandUser;
@@ -132,7 +131,13 @@ impl Commands {
         Ok(())
     }
 
-    pub fn stdin(&mut self, id: u64, input: SandboxStdin, poller: &Poller) -> Result<(), String> {
+    pub fn stdin(
+        &mut self,
+        id: u64,
+        input: SandboxStdin,
+        payload: &[u8],
+        poller: &Poller,
+    ) -> Result<(), String> {
         let Some(command) = self.commands.get_mut(&id) else {
             return Ok(());
         };
@@ -142,7 +147,7 @@ impl Commands {
         if command.close_stdin {
             return Err("stdin is closing".into());
         }
-        command.pending.extend(input.data.bytes());
+        command.pending.extend(payload);
         command.close_stdin = input.close;
         command
             .flush_stdin(poller)
@@ -328,14 +333,14 @@ fn read_output(
         *output = None;
         return Ok(0);
     }
-    let bytes = ByteChunk::new(bytes[..count as usize].to_vec());
-    answers.push(
+    answers.bytes(
         Some(id),
         if stderr {
-            SandboxAnswerKind::Stderr(bytes)
+            SandboxAnswerKind::Stderr(true)
         } else {
-            SandboxAnswerKind::Stdout(bytes)
+            SandboxAnswerKind::Stdout(true)
         },
+        &bytes[..count as usize],
     );
     Ok(count as usize)
 }

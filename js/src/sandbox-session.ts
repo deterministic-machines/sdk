@@ -1,3 +1,4 @@
+import { FrameDecoder, MAX_HEADER, decodeOutput, encodeFrame, join } from "./frame.ts";
 import type { CallOptions } from "./connection.ts";
 import { DvmError, SandboxEndedError } from "./errors.ts";
 import { RunState } from "./run-state.ts";
@@ -25,14 +26,14 @@ export interface WriteFileOptions extends CallOptions {
 // This package does not carry dvm-api's TypeScript export.
 type RequestAction =
   | { run: ({ argv: string[] } | { script: string }) & { env?: Record<string, string>; cwd?: string; stdin: boolean; user?: string } }
-  | { stdin: { data?: string; close?: boolean } }
+  | { stdin: { close?: boolean } }
   | { signal: number }
-  | { write: { path: string; data: string; mode?: number; last: boolean } }
+  | { write: { path: string; mode?: number; last: boolean } }
   | { read: { path: string } };
 type Answer = { id?: number } & (
   | { started: { pid: number; argv: string[] } }
-  | { stdout: string } | { stderr: string } | { exited: { code: number } }
-  | { written: boolean } | { data: string } | { end: boolean } | { error: string }
+  | { stdout: boolean } | { stderr: boolean } | { exited: { code: number } }
+  | { written: boolean } | { data: boolean } | { end: boolean } | { error: string }
 );
 
 class Operation {
@@ -104,9 +105,9 @@ export class Command {
   }
 }
 
-/** The only component that knows byte offsets and protocol lines. */
+/** The only component that knows byte offsets and protocol frames. */
 export class SandboxSession {
-  static readonly MAX_LINE = 65536;
+  static readonly PIECE_SIZE = 1024 * 1024;
   readonly #calls: SandboxCalls;
   readonly #wait: (options?: CallOptions) => Promise<number>;
   readonly #operations = new Map<number, Operation>();
@@ -140,9 +141,9 @@ export class SandboxSession {
       await this.#ready(options);
       const op = this.#register();
       try {
-        for (const action of this.#pieces(op.id, "write", { path, mode: options.mode }, data)) {
+        for (const [action, payload] of this.#pieces("write", { path, mode: options.mode }, data)) {
           op.check();
-          await this.#post(op.id, action, options);
+          await this.#post(op.id, action, options, payload);
         }
       } catch (error) { this.#operations.delete(op.id); throw error; }
       return op;
@@ -195,9 +196,9 @@ export class SandboxSession {
         await this.#post(operation.id, { stdin: { close: true } }, options);
         didClose!();
       } else {
-        for (const action of this.#pieces(operation.id, "stdin", {}, data)) {
+        for (const [action, payload] of this.#pieces("stdin", {}, data)) {
           operation.check();
-          await this.#post(operation.id, action, options);
+          await this.#post(operation.id, action, options, payload);
         }
       }
     });
@@ -237,9 +238,9 @@ export class SandboxSession {
   }
 
   async #append(chunk: Uint8Array, options: CallOptions, end = false): Promise<void> {
-    const state = await this.#calls.whileLive(() => this.#calls.connection.json<{ length: number }>(
-      "POST", `${this.#calls.path}/input`, { ...options,
-        body: { offset: this.#offset ?? 0, chunk: encode(chunk), end } },
+    const state = await this.#calls.whileLive(() => this.#calls.connection.input<{ length: number }>(
+      `${this.#calls.path}/input`, chunk, { ...options,
+        query: { offset: this.#offset ?? 0, end } },
     ));
     if (!Number.isSafeInteger(state.length) || state.length < 0) {
       const error = new DvmError("input length exceeds JavaScript's safe integers");
@@ -249,49 +250,39 @@ export class SandboxSession {
     this.#offset = state.length;
   }
 
-  #line(id: number, action: RequestAction): Uint8Array {
-    return new TextEncoder().encode(JSON.stringify({ id, ...action }) + "\n");
+  async #post(id: number, action: RequestAction, options: CallOptions, payload: Uint8Array = new Uint8Array()): Promise<void> {
+    const frame = encodeFrame({ id, ...action }, payload);
+    if (frame.length - payload.length - 1 > MAX_HEADER) throw new DvmError("request header exceeds 65536 bytes");
+    for (let at = 0; at < frame.length; at += 65536) await this.#append(frame.subarray(at, at + 65536), options);
   }
 
-  async #post(id: number, action: RequestAction, options: CallOptions): Promise<void> {
-    const line = this.#line(id, action);
-    if (line.length > SandboxSession.MAX_LINE) throw new DvmError("request line exceeds 65536 bytes");
-    await this.#append(line, options);
-  }
-
-  *#pieces(id: number, kind: "stdin" | "write", fields: { path?: string; mode?: number }, data: Uint8Array): Generator<RequestAction> {
-    const envelope = kind === "write"
-      ? { write: { path: fields.path!, mode: fields.mode, data: "", last: false } }
-      : { stdin: { data: "" } };
-    const size = Math.floor((SandboxSession.MAX_LINE - this.#line(id, envelope).length) / 4) * 3;
-    if (size < 1) throw new DvmError("request line exceeds 65536 bytes");
-    for (let at = 0; at < Math.max(1, data.length); at += size) {
-      const piece = data.subarray(at, at + size);
-      yield kind === "write"
-        ? { write: { path: fields.path!, mode: fields.mode, data: encode(piece), last: at + piece.length === data.length } }
-        : { stdin: { data: encode(piece) } };
+  *#pieces(kind: "stdin" | "write", fields: { path?: string; mode?: number }, data: Uint8Array): Generator<[RequestAction, Uint8Array]> {
+    for (let at = 0; at < Math.max(1, data.length); at += SandboxSession.PIECE_SIZE) {
+      const piece = data.subarray(at, at + SandboxSession.PIECE_SIZE);
+      const action = kind === "write"
+        ? { write: { path: fields.path!, mode: fields.mode, last: at + piece.length === data.length } }
+        : { stdin: {} };
+      yield [action, piece];
     }
   }
 
   async #readAnswers(): Promise<void> {
     let offset = 0, stderrOffset = 0;
-    let pending: Uint8Array = new Uint8Array();
+    const decoder = new FrameDecoder();
     try {
       for (;;) {
-        const output = await this.#calls.connection.json<{ stdout: string; stderr: string; more: boolean }>(
-          "GET", `/executions/${this.#calls.id}/output`, {
-            query: { offset, stderr_offset: stderrOffset }, signal: this.#reading.signal,
-          });
-        const chunk = decode(output.stdout);
-        offset += chunk.length;
-        stderrOffset += decode(output.stderr).length;
-        pending = join([pending, chunk]);
-        let end: number;
-        while ((end = pending.indexOf(10)) >= 0) {
-          this.#dispatch(JSON.parse(new TextDecoder().decode(pending.subarray(0, end))) as Answer);
-          pending = pending.slice(end + 1);
+        const output = decodeOutput(await this.#calls.connection.bytes(`/executions/${this.#calls.id}/output`, {
+          query: { offset, stderr_offset: stderrOffset }, signal: this.#reading.signal,
+        }));
+        offset += output.stdout.length;
+        stderrOffset += output.stderr.length;
+        decoder.push(output.stdout);
+        for (;;) {
+          const frame = decoder.nextFrame<Answer>();
+          if (!frame) break;
+          this.#dispatch(frame.header, frame.payload);
         }
-        if (!output.more) {
+        if (!output.more && !output.cut) {
           const code = await this.#wait();
           throw new SandboxEndedError(this.#calls.id, new RunState({ kind: "exited", code }));
         }
@@ -299,7 +290,7 @@ export class SandboxSession {
     } catch (error) { this.#fail(error); }
   }
 
-  #dispatch(answer: Answer): void {
+  #dispatch(answer: Answer, payload: Uint8Array): void {
     if ("error" in answer && answer.id === undefined) {
       this.#failOperations(new DvmError(answer.error));
       return;
@@ -308,9 +299,9 @@ export class SandboxSession {
     if (!operation) return;
     if ("error" in answer) operation.fail(new DvmError(answer.error));
     else if ("started" in answer) operation.started = true;
-    else if ("stdout" in answer) operation.stdout.push(decode(answer.stdout));
-    else if ("stderr" in answer) operation.stderr.push(decode(answer.stderr));
-    else if ("data" in answer) operation.data.push(decode(answer.data));
+    else if ("stdout" in answer) operation.stdout.push(payload);
+    else if ("stderr" in answer) operation.stderr.push(payload);
+    else if ("data" in answer) operation.data.push(payload);
     else if ("exited" in answer) {
       operation.result = { exitCode: answer.exited.code, stdout: join(operation.stdout), stderr: join(operation.stderr) };
       operation.done = true;
@@ -330,15 +321,3 @@ export class SandboxSession {
   }
 }
 
-function encode(bytes: Uint8Array): string {
-  return btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""));
-}
-function decode(encoded: string): Uint8Array {
-  return Uint8Array.from(atob(encoded), (byte) => byte.charCodeAt(0));
-}
-function join(parts: readonly Uint8Array[]): Uint8Array {
-  const bytes = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
-  let at = 0;
-  for (const part of parts) { bytes.set(part, at); at += part.length; }
-  return bytes;
-}

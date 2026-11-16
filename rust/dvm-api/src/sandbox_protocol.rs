@@ -1,10 +1,10 @@
-//! The sandbox server's JSON lines, independent of the controller's API.
+//! The sandbox server's frames (`frame.rs`), independent of the controller's
+//! API: requests on its stdin, answers on its stdout. A frame's bytes are a
+//! command's input or output, or a piece of a file.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-
-use crate::ByteChunk;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -67,9 +67,6 @@ pub enum SandboxProgram {
 pub struct SandboxStdin {
     #[serde(default)]
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
-    pub data: ByteChunk,
-    #[serde(default)]
-    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
     pub close: bool,
 }
 
@@ -81,7 +78,6 @@ pub struct SandboxWrite {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<u32>,
-    pub data: ByteChunk,
     #[serde(default)]
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
     pub last: bool,
@@ -113,11 +109,13 @@ pub struct SandboxAnswer {
 #[serde(rename_all = "snake_case")]
 pub enum SandboxAnswerKind {
     Started(SandboxStarted),
-    Stdout(ByteChunk),
-    Stderr(ByteChunk),
+    /// The frame's bytes are the command's.
+    Stdout(bool),
+    Stderr(bool),
     Exited(SandboxExited),
     Written(bool),
-    Data(ByteChunk),
+    /// The frame's bytes are the file's.
+    Data(bool),
     End(bool),
     Error(String),
 }
@@ -143,16 +141,18 @@ pub struct SandboxExited {
 mod tests {
     use super::*;
 
+    use crate::{decode_frame, encode_frame};
+
     #[test]
-    fn plain_lines_round_trip_and_reject_ambiguous_requests() {
+    fn requests_round_trip_and_ambiguous_ones_are_refused() {
         for line in [
             r#"{"id":0,"run":{"argv":["ls","-l"],"env":{"A":"1"},"cwd":"/repo","stdin":true}}"#,
             r#"{"id":2,"run":{"script":"ls -l | wc -l"}}"#,
-            r#"{"id":0,"stdin":{"data":"aGk=","close":true}}"#,
+            r#"{"id":0,"stdin":{"close":true}}"#,
             r#"{"id":0,"signal":15}"#,
-            r#"{"id":3,"write":{"path":"/repo/a","mode":420,"data":"aGk="}}"#,
+            r#"{"id":3,"write":{"path":"/repo/a","mode":420}}"#,
             r#"{"id":4,"read":{"path":"/repo/a"}}"#,
-            r#"{"id":3,"write":{"path":"/repo/a","data":"","last":true}}"#,
+            r#"{"id":3,"write":{"path":"/repo/a","last":true}}"#,
         ] {
             let request: SandboxRequest = serde_json::from_str(line).unwrap();
             let encoded = serde_json::to_string(&request).unwrap();
@@ -162,7 +162,7 @@ mod tests {
             r#"{"id":1,"signal":15,"read":{"path":"a"}}"#,
             r#"{"id":1,"run":{"argv":["ls"],"script":"ls"}}"#,
             r#"{"id":1,"run":{"argv":["ls"],"typo":true}}"#,
-            r#"{"id":1,"stdin":{"data":"!"}}"#,
+            r#"{"id":1,"stdin":{"data":"aGk="}}"#,
         ] {
             assert!(
                 serde_json::from_str::<SandboxRequest>(line).is_err(),
@@ -179,11 +179,11 @@ mod tests {
         );
         for line in [
             r#"{"id":1,"started":{"pid":7,"argv":["ls","-l"]}}"#,
-            r#"{"id":1,"stdout":"/wA="}"#,
-            r#"{"id":1,"stderr":"ZXJy"}"#,
+            r#"{"id":1,"stdout":true}"#,
+            r#"{"id":1,"stderr":true}"#,
             r#"{"id":1,"exited":{"code":143}}"#,
             r#"{"id":3,"written":true}"#,
-            r#"{"id":4,"data":"aGk="}"#,
+            r#"{"id":4,"data":true}"#,
             r#"{"id":4,"end":true}"#,
             r#"{"id":3,"error":"failed"}"#,
             r#"{"error":"bad line"}"#,
@@ -191,5 +191,38 @@ mod tests {
             let answer: SandboxAnswer = serde_json::from_str(line).unwrap();
             assert_eq!(serde_json::to_string(&answer).unwrap(), line);
         }
+    }
+
+    #[test]
+    fn a_requests_bytes_and_an_answers_follow_their_header_raw() {
+        let request = SandboxRequest {
+            id: 3,
+            action: SandboxRequestAction::Write(SandboxWrite {
+                path: "/repo/a".into(),
+                mode: None,
+                last: true,
+            }),
+        };
+        let frame = encode_frame(&request, b"\x00\n\xff");
+        assert_eq!(
+            frame,
+            b"{\"id\":3,\"write\":{\"path\":\"/repo/a\",\"last\":true},\"bytes\":3}\n\x00\n\xff"
+        );
+        let decoded = decode_frame::<SandboxRequest>(&frame).unwrap();
+        assert_eq!(
+            (decoded.header, decoded.payload),
+            (request, b"\x00\n\xff".to_vec())
+        );
+
+        let answer = SandboxAnswer {
+            id: Some(1),
+            answer: SandboxAnswerKind::Stdout(true),
+        };
+        let frame = encode_frame(&answer, b"hi\n");
+        assert_eq!(frame, b"{\"id\":1,\"stdout\":true,\"bytes\":3}\nhi\n");
+        assert_eq!(
+            decode_frame::<SandboxAnswer>(&frame).unwrap().header,
+            answer
+        );
     }
 }
