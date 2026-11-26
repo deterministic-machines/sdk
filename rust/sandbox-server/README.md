@@ -254,8 +254,8 @@ nix develop -c cargo test --manifest-path rust/Cargo.toml --all-features --no-ru
 nix develop -c timeout -k 5 120 cargo test --manifest-path rust/Cargo.toml --locked --all-features
 ```
 
-Host tests launch the built server through pipes, use bounded polling,
-and check only the protocol's ordering. The two dvm tests are ignored by
+Host tests launch the built server through pipes, wait on its output
+with no deadline, and check only the protocol's ordering. The two dvm tests are ignored by
 default. With KVM and the Alpine image available, run each separately:
 
 ```sh
@@ -266,8 +266,8 @@ nix develop -c timeout -k 5 120 cargo test --manifest-path rust/Cargo.toml --loc
 nix develop -c timeout -k 5 120 cargo test --manifest-path rust/Cargo.toml --locked -p sandbox-server --test dvm session_without_recording -- --ignored --exact --nocapture
 ```
 
-Each dvm process has a 45-second guest time limit and a 60-second host
-wait bound. On failure the test prints captured stdout and stderr. The
+A test waits as long as its process takes: a hang ends at the `timeout`
+above. On failure the test prints captured stdout and stderr. The
 recorded test drives a session interactively on one vCPU, then compares
 replay stdout byte for byte and compares exit status. It checks a group
 member's TERM handler while it waits for a syscall, leaves a daemon
