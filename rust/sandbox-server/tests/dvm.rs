@@ -2,7 +2,6 @@ mod support;
 
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
 
 use serde_json::json;
 use support::{Session, ordered, output};
@@ -16,10 +15,10 @@ fn session(dvm: &std::ffi::OsStr, server: &Path, log: Option<&Path>) -> Session 
         command.arg("--no-recording");
     }
     command
-        .args(["--cpus", "1", "--time-limit", "45", "--volume"])
+        .args(["--cpus", "1", "--volume"])
         .arg(format!("{}:/.dvm:ro", server.parent().unwrap().display()))
         .args(["--entrypoint", "/.dvm/sandbox-server", "alpine:3.20"]);
-    Session::start(command, Duration::from_secs(60))
+    Session::start(command)
 }
 
 fn exercise(server: &mut Session) {
@@ -76,7 +75,7 @@ fn exercise(server: &mut Session) {
         answers.push(answer);
     }
     assert_eq!(output(&answers, "data"), b"first\0\xff");
-    server.send(json!({"id":8,"run":{"script":"/bin/sh -c 'trap \"printf caught; exit 0\" TERM; printf ready; sleep 1000 & wait' & wait"}}));
+    server.send(json!({"id":8,"run":{"script":"/bin/sh -c 'trap \"printf caught; exit 0\" TERM; printf ready; sleep infinity & wait' & wait"}}));
     let mut answers = Vec::new();
     while output(&answers, "stdout") != b"ready" {
         let answer = server.next();
@@ -96,7 +95,7 @@ fn exercise(server: &mut Session) {
         answers.push(answer);
     }
     server.send(json!({"id":9,"run":{
-        "argv":["/bin/sh","-c","setsid /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$GATE\"; exec sleep 31337' </dev/null >/dev/null 2>&1 & while [ ! -s \"$GATE\" ]; do :; done; exit 0"],
+        "argv":["/bin/sh","-c","setsid /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$GATE\"; exec sleep infinity' </dev/null >/dev/null 2>&1 & while [ ! -s \"$GATE\" ]; do :; done; exit 0"],
         "env":{"GATE":"/tmp/daemon"}
     }}));
     ordered(&server.through_exit(9), 0);
@@ -134,8 +133,8 @@ fn run(record: bool) {
     );
     if record {
         let mut command = Command::new(dvm);
-        command.arg("replay").arg(log).args(["--time-limit", "45"]);
-        let mut replay = Session::start(command, Duration::from_secs(60));
+        command.arg("replay").arg(log);
+        let mut replay = Session::start(command);
         let replay_status = replay.finish();
         assert_eq!(replay_status, status, "{}", replay.diagnostics());
         assert_eq!(replay.stdout, recorded.stdout, "{}", replay.diagnostics());

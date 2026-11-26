@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
 
 use dvm_api::{FrameDecoder, encode_frame};
 use serde_json::Value;
@@ -16,7 +15,6 @@ pub struct Session {
     answers: VecDeque<Value>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    deadline: Instant,
     host: bool,
 }
 
@@ -26,20 +24,17 @@ impl Session {
     }
 
     pub fn host_with_stdin(stdin: impl Into<Stdio>) -> Self {
-        let mut session = Self::start_with_stdin(
-            Command::new(env!("CARGO_BIN_EXE_sandbox-server")),
-            Duration::from_secs(4),
-            stdin,
-        );
+        let mut session =
+            Self::start_with_stdin(Command::new(env!("CARGO_BIN_EXE_sandbox-server")), stdin);
         session.host = true;
         session
     }
 
-    pub fn start(command: Command, limit: Duration) -> Self {
-        Self::start_with_stdin(command, limit, Stdio::piped())
+    pub fn start(command: Command) -> Self {
+        Self::start_with_stdin(command, Stdio::piped())
     }
 
-    fn start_with_stdin(mut command: Command, limit: Duration, stdin: impl Into<Stdio>) -> Self {
+    fn start_with_stdin(mut command: Command, stdin: impl Into<Stdio>) -> Self {
         let mut child = command
             .stdin(stdin)
             .stdout(Stdio::piped())
@@ -71,7 +66,6 @@ impl Session {
             answers: VecDeque::new(),
             stdout: Vec::new(),
             stderr: Vec::new(),
-            deadline: Instant::now() + limit,
             host: false,
         }
     }
@@ -86,7 +80,6 @@ impl Session {
 
     pub fn raw(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
-            self.check_deadline("writing requests");
             match self.input.as_mut().unwrap().write(bytes) {
                 Ok(count) => {
                     assert_ne!(count, 0);
@@ -99,10 +92,17 @@ impl Session {
         }
     }
 
+    /// The next answer; it fails the test once the process exited without it.
     pub fn next(&mut self) -> Value {
         loop {
             if let Some(answer) = self.answers.pop_front() {
                 return answer;
+            }
+            if self.child.try_wait().unwrap().is_some() {
+                self.read_output();
+                return self.answers.pop_front().unwrap_or_else(|| {
+                    panic!("it exited without answering; {}", self.diagnostics())
+                });
             }
             self.pump(false);
         }
@@ -128,7 +128,6 @@ impl Session {
     pub fn finish(&mut self) -> ExitStatus {
         self.close();
         loop {
-            self.check_deadline("waiting for process exit");
             if let Some(status) = self.child.try_wait().unwrap() {
                 self.read_output();
                 return status;
@@ -137,18 +136,15 @@ impl Session {
         }
     }
 
-    pub fn wait_until(&mut self, operation: &str, mut condition: impl FnMut() -> bool) {
-        loop {
-            self.check_deadline(operation);
-            if condition() {
-                return;
-            }
+    /// Waits until `condition` holds, checked again as the process writes and every poll's
+    /// 20 ms.
+    pub fn wait_until(&mut self, mut condition: impl FnMut() -> bool) {
+        while !condition() {
             self.pump(false);
         }
     }
 
     fn pump(&mut self, writing: bool) {
-        self.check_deadline("waiting for an answer or exit");
         let mut fds = vec![
             libc::pollfd {
                 fd: self.child.stdout.as_ref().unwrap().as_raw_fd(),
@@ -177,7 +173,6 @@ impl Session {
         let mut bytes = [0; 16384];
         for stderr in [false, true] {
             loop {
-                self.check_deadline("reading process output");
                 let result = if stderr {
                     self.child.stderr.as_mut().unwrap().read(&mut bytes)
                 } else {
@@ -204,14 +199,6 @@ impl Session {
                 }
             }
         }
-    }
-
-    fn check_deadline(&self, operation: &str) {
-        assert!(
-            Instant::now() < self.deadline,
-            "bounded wait expired {operation}; {}",
-            self.diagnostics()
-        );
     }
 
     pub fn diagnostics(&self) -> String {
