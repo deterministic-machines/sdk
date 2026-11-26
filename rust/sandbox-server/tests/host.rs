@@ -393,7 +393,7 @@ fn a_tracing_stop_keeps_the_command_live_for_signals() {
     ]}}));
     let started = server.next();
     let pid = started["started"]["pid"].as_i64().unwrap();
-    server.wait_until("waiting for the command's tracing stop", || {
+    server.wait_until(|| {
         std::fs::read_to_string(format!("/proc/{pid}/status"))
             .is_ok_and(|status| status.contains("State:\tt"))
     });
@@ -485,7 +485,7 @@ fn shutdown_does_not_wait_for_a_daemon_outside_the_group() {
     let gate = directory.path().join("daemon");
     let mut server = Session::host();
     server.send(json!({"id":1,"run":{
-        "argv":["/bin/sh","-c","setsid /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$GATE\"; exec sleep 31337' </dev/null >/dev/null 2>&1 & while [ ! -s \"$GATE\" ]; do :; done; exit 0"],
+        "argv":["/bin/sh","-c","setsid /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$GATE\"; exec sleep infinity' </dev/null >/dev/null 2>&1 & while [ ! -s \"$GATE\" ]; do :; done; exit 0"],
         "env":{"GATE":gate}
     }}));
     ordered(&server.through_exit(1), 0);
@@ -511,7 +511,7 @@ fn eof_and_termination_kill_commands_and_exit_zero() {
             assert_eq!(unsafe { libc::kill(server.child.id() as i32, signal) }, 0);
         }
         assert!(server.finish().success(), "{}", server.diagnostics());
-        server.wait_until("waiting for the killed command to be reaped", || {
+        server.wait_until(|| {
             (unsafe { libc::kill(pid, 0) }) == -1
                 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         });

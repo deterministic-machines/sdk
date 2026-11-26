@@ -56,7 +56,7 @@ class FakeSandbox:
         self.calls.append(("run", command, kwargs))
         if isinstance(command, list):
             args = [str(self.local(arg)) if arg.startswith("/") else arg for arg in command]
-            result = subprocess.run(args, cwd=self.root, capture_output=True, timeout=2)
+            result = subprocess.run(args, cwd=self.root, capture_output=True)
             return CommandResult(result.returncode, result.stdout, result.stderr)
         return self.result
 
