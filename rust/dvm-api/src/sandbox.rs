@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Capacity, ImageReference, Run, RunId, RunState, SandboxNetwork};
 
-/// A sandbox's id: its run's, as its runner and its output know it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
@@ -22,7 +21,6 @@ impl SandboxId {
         self.0
     }
 
-    /// Its run's id.
     pub fn run(self) -> RunId {
         RunId::new(self.0)
     }
@@ -34,94 +32,62 @@ impl fmt::Display for SandboxId {
     }
 }
 
-/// A sandbox: one run of its spec, recorded, started as it's made, and
-/// the replays of its recording. Its id is its run's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
 pub struct Sandbox {
     pub id: SandboxId,
-    /// Its owner's GitHub login; none for one made before users signed in,
-    /// which only admins see.
     pub owner: Option<String>,
     pub spec: SandboxSpec,
-    /// Its run: queued as it's made, then started, paused, ended.
     pub run: Run,
-    /// Its replays, oldest first.
-    pub replays: Vec<Run>,
 }
 
 impl Sandbox {
-    /// Whether `id` is its run or one of its replays.
-    pub fn holds(&self, id: RunId) -> bool {
-        self.member(id).is_some()
+    pub fn check_inspectable(&self) -> Result<(), String> {
+        if self.run.inspectable {
+            return Ok(());
+        }
+        if self.run.state.is_active() {
+            return Err(format!("sandbox {} is still running", self.id));
+        }
+        if matches!(self.run.state, RunState::Stopped) {
+            return Err(format!("sandbox {} was stopped before exit", self.id));
+        }
+        if matches!(self.run.state, RunState::Failed { .. }) {
+            return Err(format!("sandbox {} failed before exit", self.id));
+        }
+        if self.run.outdated {
+            return Err(format!(
+                "sandbox {} ran on an older dvm than its runner's now: run it again",
+                self.id
+            ));
+        }
+        Err(format!("sandbox {} has no inspectable state", self.id))
     }
 
-    /// Its run, or its replay, of that id.
-    pub fn member(&self, id: RunId) -> Option<&Run> {
-        std::iter::once(&self.run)
-            .chain(&self.replays)
-            .find(|member| member.id == id)
-    }
-
-    /// Whether its exited run has a whole log its runner can replay.
-    pub fn replayable(&self) -> Result<(), String> {
-        self.run
-            .replayable_if_whole(matches!(self.run.state, RunState::Exited { .. }))
-    }
-
-    /// Whether a run of it is going, its own or a replay.
-    pub fn is_going(&self) -> bool {
-        std::iter::once(&self.run)
-            .chain(&self.replays)
-            .any(|member| member.state.is_active())
-    }
-
-    /// Takes its run or a replay as it is now, if it's of this sandbox and
-    /// no older than the copy it has: whether it's of this sandbox.
     pub fn take(&mut self, changed: &Run) -> bool {
-        if changed.sandbox() != self.id {
+        if changed.id != self.run.id {
             return false;
         }
-        if changed.id == self.run.id {
-            if changed.supersedes(&self.run) {
-                self.run = changed.clone();
-            }
-            return true;
-        }
-        match self
-            .replays
-            .iter_mut()
-            .find(|replay| replay.id == changed.id)
-        {
-            Some(replay) if changed.supersedes(replay) => *replay = changed.clone(),
-            Some(_) => {}
-            None => {
-                self.replays.push(changed.clone());
-                self.replays.sort_by_key(|replay| replay.id.get());
-            }
+        if changed.supersedes(&self.run) {
+            self.run = changed.clone();
         }
         true
     }
 }
 
-/// A page of the sandboxes a user sees, `GET /api/sandboxes?before=`: the
-/// newest before the sandbox `before`, if given, newest first.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
 pub struct SandboxesPage {
     pub sandboxes: Vec<Sandbox>,
-    /// Whether there are older ones than these.
     pub older: bool,
 }
 
 impl SandboxesPage {
-    /// The most sandboxes a page holds.
     pub const SANDBOXES: usize = 50;
 }
 
-/// An environment variable the program is given.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
@@ -131,7 +97,6 @@ pub struct EnvironmentVariable {
 }
 
 impl EnvironmentVariable {
-    /// Whether `name` is one a shell takes: `[A-Za-z_][A-Za-z0-9_]*`.
     pub fn is_name(name: &str) -> bool {
         let mut chars = name.chars();
         chars
@@ -141,32 +106,23 @@ impl EnvironmentVariable {
     }
 }
 
-/// A sandbox's spec as a person writes it, unchecked: what the panel's form
-/// holds, and what the controller takes to create a sandbox. Each field but
-/// the image may be left out, for `dvm run`'s defaults.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
 #[serde(default)]
 pub struct SandboxDraft {
-    /// The image's name, unless given (`ImageReference::sandbox_name`).
     pub name: String,
     pub image: String,
-    /// In place of the image's entrypoint.
     pub entrypoint: Option<String>,
-    /// The program to run. With neither command nor entrypoint, takes commands.
     pub command: Vec<String>,
-    /// After the image's own.
     pub environment: Vec<EnvironmentVariable>,
     pub cpus: u32,
     pub memory_mib: u32,
     pub seed: u64,
-    /// Where its connections out may go: the internet unless given.
     pub network: SandboxNetwork,
 }
 
 impl Default for SandboxDraft {
-    /// What `dvm run` gives unless told: one vCPU, 1 GiB, seed 0.
     fn default() -> Self {
         Self {
             name: String::new(),
@@ -182,9 +138,6 @@ impl Default for SandboxDraft {
     }
 }
 
-/// What a sandbox runs, checked: each value is one `dvm run` may be
-/// given as it is. Only a [`SandboxDraft`] that passes becomes one, deserialized
-/// too.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
@@ -203,19 +156,12 @@ pub struct SandboxSpec {
 }
 
 impl SandboxSpec {
-    /// The vCPUs a sandbox may have.
     pub const CPUS: RangeInclusive<u32> = 1..=8;
-    /// The memory a sandbox may have, in MiB.
     pub const MEMORY_MIB: RangeInclusive<u32> = 128..=16384;
-    /// The seeds a sandbox may have: those a JSON number carries exactly to
-    /// every client, a browser's too (2^53 − 1 at most), so a spec read
-    /// back runs as it was made.
+    /// Bounded below 2^53 so JSON numbers pass unmodified across JavaScript clients.
     pub const SEEDS: RangeInclusive<u64> = 0..=(1 << 53) - 1;
-    /// A name is a DNS label, so that it may name a host later.
     const NAME_LENGTH: usize = 63;
-    /// dvm's memory over the VM's, which it backs only as the program
-    /// touches it: 14 MiB measured (`alpine:3.20 echo hi`, at 256 MiB to
-    /// 4 GiB of `--memory`), counted with room to spare.
+    /// Extra host memory reserved for dvm itself per VM.
     const DVM_OWN_MEMORY_MIB: u64 = 32;
 
     pub fn name(&self) -> &str {
@@ -234,7 +180,6 @@ impl SandboxSpec {
         &self.command
     }
 
-    /// Whether the sandbox runs the sandbox server and accepts input bytes.
     pub fn takes_commands(&self) -> bool {
         self.command.is_empty() && self.entrypoint.is_none()
     }
@@ -259,7 +204,6 @@ impl SandboxSpec {
         &self.network
     }
 
-    /// The same spec, with the network its sandbox has now.
     pub fn with_network(self, network: SandboxNetwork) -> Result<Self, SpecError> {
         network
             .check()
@@ -267,8 +211,6 @@ impl SandboxSpec {
         Ok(Self { network, ..self })
     }
 
-    /// What a run of the spec takes from its runner: a host CPU for each
-    /// vCPU, and the VM's memory with dvm's own.
     pub fn footprint(&self) -> Capacity {
         Capacity {
             cpus: self.cpus,
@@ -276,7 +218,6 @@ impl SandboxSpec {
         }
     }
 
-    /// Lowercase letters, digits and inner `-`, as a DNS label.
     fn check_name(name: &str) -> Result<(), SpecError> {
         let valid = !name.is_empty()
             && name.len() <= Self::NAME_LENGTH
@@ -295,7 +236,6 @@ impl SandboxSpec {
         }
     }
 
-    /// Names a shell would take (`[A-Za-z_][A-Za-z0-9_]*`), each once.
     fn check_environment(environment: &[EnvironmentVariable]) -> Result<(), SpecError> {
         let mut names = HashSet::new();
         for variable in environment {
@@ -319,7 +259,6 @@ impl SandboxSpec {
         Ok(())
     }
 
-    /// A program's argument can't hold a NUL.
     fn check_argument(field: SpecField, argument: &str) -> Result<(), SpecError> {
         if argument.contains('\0') {
             Err(SpecError::new(field, "can't contain a NUL character"))
@@ -404,7 +343,6 @@ impl From<SandboxSpec> for SandboxDraft {
     }
 }
 
-/// Why a draft isn't a spec: the first field that's wrong, and how.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{field}: {problem}")]
 pub struct SpecError {
@@ -429,7 +367,6 @@ impl SpecError {
     }
 }
 
-/// A field of a [`SandboxDraft`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpecField {
     Name,
@@ -573,69 +510,69 @@ mod tests {
         assert!(serde_json::from_str::<SandboxSpec>(&invalid).is_err());
     }
 
-    /// A sandbox keeps the newer copy of its run and each replay, and
-    /// takes a new replay of its own, but no other sandbox's run.
     #[test]
-    fn a_sandbox_keeps_the_newer_copy_of_each_of_its_runs() {
+    fn a_sandbox_keeps_the_newer_copy_of_its_run() {
         use crate::Timestamp;
-        let run = |id: i64, replay_of: Option<i64>, state: RunState, version: u64| Run {
+        let run = |id: i64, state: RunState, version: u64| Run {
             id: RunId::new(id),
-            replay_of: replay_of.map(RunId::new),
             state,
             runner: None,
             created_at: Timestamp::from_unix_millis(0),
             started_at: None,
             ended_at: None,
-            log_bytes: None,
-            log_outdated: false,
-            verdict: None,
+            has_timeline: false,
+            inspectable: false,
+            outdated: false,
             version,
         };
-        let exited = RunState::Exited { code: 0 };
         let mut sandbox = Sandbox {
             id: SandboxId::new(1),
             owner: None,
             spec: SandboxSpec::try_from(draft()).unwrap(),
-            run: run(1, None, exited.clone(), 3),
-            replays: vec![],
+            run: run(1, RunState::Queued, 1),
         };
-        let running = run(2, Some(1), RunState::Running, 2);
-        assert!(sandbox.take(&run(2, Some(1), RunState::Queued, 0)));
-        assert!(sandbox.take(&running));
-        // The queued copy, answered late, is older than the running one.
-        assert!(sandbox.take(&run(2, Some(1), RunState::Queued, 1)));
-        assert_eq!(sandbox.replays, [running]);
-        assert!(sandbox.is_going());
-        assert!(!sandbox.take(&run(3, None, RunState::Queued, 0)));
-        assert!(sandbox.holds(RunId::new(2)) && !sandbox.holds(RunId::new(3)));
-        assert_eq!(run(2, Some(1), exited, 0).sandbox(), sandbox.id);
+        assert!(sandbox.take(&run(1, RunState::Running, 2)));
+        assert_eq!(sandbox.run.state, RunState::Running);
+        assert!(sandbox.take(&run(1, RunState::Queued, 0)));
+        assert_eq!(sandbox.run.state, RunState::Running);
+        assert!(!sandbox.take(&run(2, RunState::Running, 3)));
     }
 
-    /// A stopped run's recording is cut short: only an exited one replays.
     #[test]
-    fn only_an_exited_run_replays() {
+    fn inspectability_reports_why_not() {
         use crate::Timestamp;
-        let sandbox = |state: RunState| Sandbox {
+        let sandbox = |state: RunState, inspectable: bool, outdated: bool| Sandbox {
             id: SandboxId::new(1),
             owner: None,
             spec: SandboxSpec::try_from(draft()).unwrap(),
             run: Run {
                 id: RunId::new(1),
-                replay_of: None,
                 state,
                 runner: Some("test".to_owned()),
                 created_at: Timestamp::from_unix_millis(0),
                 started_at: None,
                 ended_at: None,
-                log_bytes: Some(1),
-                log_outdated: false,
-                verdict: None,
+                has_timeline: true,
+                inspectable,
+                outdated,
                 version: 0,
             },
-            replays: vec![],
         };
-        let stopped = sandbox(RunState::Stopped).replayable().unwrap_err();
-        assert!(stopped.contains("cut short"), "{stopped}");
-        assert_eq!(sandbox(RunState::Exited { code: 3 }).replayable(), Ok(()));
+        assert!(
+            sandbox(RunState::Stopped, false, false)
+                .check_inspectable()
+                .unwrap_err()
+                .contains("stopped")
+        );
+        assert!(
+            sandbox(RunState::Exited { code: 0 }, false, true)
+                .check_inspectable()
+                .unwrap_err()
+                .contains("older dvm")
+        );
+        assert_eq!(
+            sandbox(RunState::Exited { code: 3 }, true, false).check_inspectable(),
+            Ok(())
+        );
     }
 }

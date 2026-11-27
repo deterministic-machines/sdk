@@ -1,5 +1,5 @@
-"""A recorded sandbox: a session that takes commands, or one run of a
-supplied program. Its execution replays once its process exited."""
+"""A sandbox: a session that takes commands, or one run of a supplied
+program, with point-in-time inspection."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Mapping, Optional, TypeVar
 
 from dvm.connection import Connection
 from dvm.errors import ConflictError, DvmError, SandboxEndedError, SandboxFailedError
-from dvm.execution import Output, read_output
+from dvm.point import AsyncSandboxPoint, Output, read_output, seek_point
 from dvm.run_state import RunState
 from dvm.sandbox_session import AsyncCommand, CommandResult, SandboxSession
 
@@ -16,10 +16,10 @@ T = TypeVar("T")
 
 class AsyncSandbox:
     """A sandbox, from ``await AsyncSandbox.create(image)``, or another
-    process's, from ``await AsyncSandbox.connect(sandbox_id)``. Its ``id`` is
-    its execution's too. With no command or entrypoint it takes commands;
-    its context ends input and waits for exit. A paused sandbox, or one
-    running a supplied program, is stopped at the end instead."""
+    process's, from ``await AsyncSandbox.connect(sandbox_id)``. With no
+    command or entrypoint it takes commands; its context ends input and waits
+    for exit. A paused sandbox, or one running a supplied program, is stopped
+    at the end instead."""
 
     def __init__(
         self, connection: Connection, sandbox: Mapping[str, Any],
@@ -28,9 +28,10 @@ class AsyncSandbox:
         self._connection = connection
         self.id: int = sandbox["id"]
         self._path = f"/sandboxes/{self.id}"
-        self.name: str = sandbox["spec"]["name"]
+        self.spec: dict[str, Any] = dict(sandbox["spec"])
+        self.name: str = self.spec["name"]
         self._takes_commands = (
-            not sandbox["spec"].get("command") and sandbox["spec"].get("entrypoint") is None
+            not self.spec.get("command") and self.spec.get("entrypoint") is None
         )
         self._session: Optional[SandboxSession] = None
         self._input_offset = input_offset
@@ -118,11 +119,14 @@ class AsyncSandbox:
         (``*.github.com``), an IPv4 address or network (``8.8.8.0/24``) on the
         internet: never its runner, the runner's LAN, or link-local addresses."""
         body = _network(network, allow)
-        await self._while_live(self._connection.json("PUT", f"{self._path}/network", body=body))
+        updated = await self._while_live(
+            self._connection.json("PUT", f"{self._path}/network", body=body)
+        )
+        if updated and "spec" in updated:
+            self.spec = dict(updated["spec"])
 
     async def stop(self) -> None:
-        """Stops it. A stopped sandbox's log is cut short, and doesn't
-        replay. One that already ended stays as it is."""
+        """Stops it. One that already ended stays as it is."""
         try:
             await self._connection.json("POST", f"{self._path}/stop")
         except ConflictError:
@@ -199,7 +203,27 @@ class AsyncSandbox:
         """What process 1 wrote so far. For a sandbox that takes commands,
         stdout is the server's raw answer frames, not command output.
         """
-        return await read_output(self._connection, f"/executions/{self.id}/output")
+        return await read_output(self._connection, f"{self._path}/output")
+
+    async def seek(
+        self,
+        *,
+        at_ns: Optional[int] = None,
+        thread: Optional[int] = None,
+        event: Optional[int] = None,
+        watch: Optional[Sequence[Any]] = None,
+    ) -> AsyncSandboxPoint:
+        if at_ns is not None and (thread is not None or event is not None):
+            raise ValueError("pass at_ns or thread and event, not both")
+        if (thread is None) != (event is None):
+            raise ValueError("thread and event must be passed together")
+        if at_ns is not None:
+            target: dict[str, Any] = {"kind": "at_ns", "ns": at_ns}
+        elif thread is not None and event is not None:
+            target = {"kind": "event", "thread": thread, "event": event}
+        else:
+            target = {"kind": "end"}
+        return await seek_point(self._connection, self.id, target, watch)
 
     async def close(self) -> None:
         """Closes its connection; the sandbox goes on."""

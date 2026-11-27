@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { AuthenticationError, ConflictError, Execution, InvalidRequestError, Sandbox, SandboxEndedError } from "../src/index.ts";
+import { AuthenticationError, ConflictError, InvalidRequestError, Sandbox, SandboxEndedError } from "../src/index.ts";
 const IMAGE = "alpine:3.20";
 const platform = process.env.DVM_API_KEY ? {} : { skip: "needs DVM_API_URL and DVM_API_KEY" };
 
@@ -14,18 +14,21 @@ async function withSandbox(making: Promise<Sandbox>, use: (sandbox: Sandbox) => 
   }
 }
 
-test("a program returns its output and exit code and replays", platform, async () => {
+test("a program returns its output and exit code and can seek", platform, async () => {
   const command = ["sh", "-c", "printf 'out\\377'; echo err >&2; exit 3"];
   await withSandbox(Sandbox.create(IMAGE, { command, seed: 7 }), async (sandbox) => {
     assert.equal(await sandbox.wait(), 3);
     const output = await sandbox.output();
     assert.deepEqual(output, { stdout: new Uint8Array(Buffer.from("out\xfferr\n", "latin1")), stderr: new Uint8Array() });
-    const execution = await Execution.get(sandbox.id);
-    assert.deepEqual([execution.state.kind, execution.spec.seed, execution.spec.name], ["exited", 7, "alpine"]);
-    assert.notEqual(execution.logBytes, null);
-    const replay = await execution.replay();
-    assert.ok((await replay.wait()).same);
-    assert.deepEqual(await replay.output(), output);
+    assert.deepEqual([(await sandbox.state()).kind, sandbox.spec.seed, sandbox.spec.name], ["exited", 7, "alpine"]);
+    const p1 = await sandbox.seek({ atNs: 0, watch: ["processes"] });
+    const p2 = await p1.step();
+    assert.ok(p2 !== null);
+    assert.notDeepEqual([p2.thread, p2.event], [p1.thread, p1.event]);
+    const end = await sandbox.seek();
+    assert.ok(end.operations > 0);
+    assert.equal((await end.stat("/")).type, "directory");
+    assert.ok((await p1.listDir("/")).length > 0);
   });
 });
 
@@ -48,7 +51,7 @@ test("pause resume connect and stop", platform, async () => {
     await connected.stop();
     await connected.stop();
     await assert.rejects(sandbox.wait(), SandboxEndedError);
-    await assert.rejects((await Execution.get(sandbox.id)).replay(), ConflictError);
+    await assert.rejects(sandbox.seek(), ConflictError);
   });
 });
 
@@ -60,7 +63,9 @@ test("refusals are typed", platform, async () => {
 test("a command session ends with a whole recording", platform, async () => {
   const path = `/tmp/dvm-js-${crypto.randomUUID()}`;
   let id = 0;
+  let capturedSandbox!: Sandbox;
   await withSandbox(Sandbox.create(IMAGE, { env: { A: "inherited" } }), async (sandbox) => {
+    capturedSandbox = sandbox;
     id = sandbox.id;
     const result = await sandbox.run(["sh", "-c", "printf '%s ' \"$A\"; pwd; printf err >&2"],
       { env: { A: "command" }, cwd: "/tmp" });
@@ -83,9 +88,14 @@ test("a command session ends with a whole recording", platform, async () => {
     const connected = await Sandbox.connect(id);
     assert.equal(new TextDecoder().decode((await connected.run("printf connected")).stdout), "connected");
   });
-  const execution = await Execution.get(id);
-  assert.deepEqual([execution.state.kind, execution.state.exitCode], ["exited", 0]);
-  if (process.env.DVM_TEST_SESSION_REPLAY === "1") assert.ok((await (await execution.replay()).wait()).same);
+  assert.equal((await capturedSandbox.state()).kind, "exited");
+  if (process.env.DVM_TEST_SESSION_INSPECT === "1") {
+    const start = await capturedSandbox.seek({ atNs: 1, watch: ["file-syscalls"] });
+    const next = await start.step();
+    assert.ok(next !== null);
+    assert.notDeepEqual([next.thread, next.event], [start.thread, start.event]);
+    assert.ok((await (await capturedSandbox.seek()).listDir("/")).length > 0);
+  }
 });
 
 test("new methods refuse a sandbox with a command", platform, async () => {

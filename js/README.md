@@ -14,31 +14,30 @@ wherever you like. Where no one is there to approve one, such as CI, make a
 key on [dvm.run's API keys page](https://sandbox.dvm.run/keys) and set
 `DVM_API_KEY`.
 
-A sandbox records its process from start to end. With no command or
-entrypoint it runs the sandbox server and takes commands; the image's own
-command does not run. Commands run as root, in the image's environment and
-working directory, with any environment you supply; a command's `user`
-runs it as another of the image's users. With a command or
-entrypoint it is one run of that program, and the new command and file
-methods fail locally without sending a request.
+A sandbox captures its execution from start to end so you can seek back
+and inspect its state later. With no command or entrypoint it runs the
+sandbox server and takes commands; the image's own command does not run.
+Commands run as root, in the image's environment and working directory,
+with any environment you supply; a command's `user` runs it as another of
+the image's users. With a command or entrypoint it is one run of that
+program, and the new command and file methods fail locally without sending
+a request.
 
 ```ts
-import { Sandbox, Execution } from "dvm-run";
+import { Sandbox } from "dvm-run";
 
-let id: number;
-{
-  await using sandbox = await Sandbox.create("python:3.12");
-  id = sandbox.id;
-  const result = await sandbox.run(["python", "-c", "print(2)"]);
-  console.assert(result.exitCode === 0);
-  console.assert(new TextDecoder().decode(result.stdout) === "2\n");
-  await sandbox.writeFile("/tmp/a.txt", new TextEncoder().encode("hi"));
-  console.assert(new TextDecoder().decode(await sandbox.readFile("/tmp/a.txt")) === "hi");
-  const server = await sandbox.start("python -m http.server 8000");
-  await server.signal(15);
-  await server.wait();
-}
-console.assert((await (await (await Execution.get(id)).replay()).wait()).same);
+await using sandbox = await Sandbox.create("python:3.12");
+const result = await sandbox.run(["python", "-c", "print(2)"]);
+console.assert(result.exitCode === 0);
+console.assert(new TextDecoder().decode(result.stdout) === "2\n");
+await sandbox.writeFile("/tmp/a.txt", new TextEncoder().encode("hi"));
+console.assert(new TextDecoder().decode(await sandbox.readFile("/tmp/a.txt")) === "hi");
+const server = await sandbox.start("python -m http.server 8000");
+await server.signal(15);
+await server.wait();
+await sandbox.end();
+const point = await sandbox.seek();
+console.assert(new TextDecoder().decode(await point.readFile("/tmp/a.txt")) === "hi");
 ```
 
 `run(command, { env, cwd, stdin, user }?)` takes argv (a string array) or a
@@ -86,11 +85,11 @@ its input. `connect(id)` learns the length but does not lock out another
 writer. JavaScript ids and offsets must stay within safe integers.
 
 At scope end, `await using` ends a command sandbox's input and waits for
-exit, so its recording replays. `end()` does this explicitly and returns
+exit, leaving it ready to inspect. `end()` does this explicitly and returns
 the sandbox's exit code. EOF kills any commands still running and makes
 the server exit 0. A paused sandbox cannot read EOF, so scope end stops
 it instead. A supplied program is also stopped if still active. A stopped
-recording does not replay. On Node 22, which cannot parse `await using`,
+sandbox cannot be sought. On Node 22, which cannot parse `await using`,
 use `try/finally` and `await sandbox[Symbol.asyncDispose]()` in the finally,
 or compile the TypeScript example.
 
@@ -101,9 +100,12 @@ or compile the TypeScript example.
 - `output()` is raw process output: a command sandbox's stdout is the
   server's answer frames. A supplied program's stdout and stderr are
   merged into `stdout` by dvm; `stderr` is dvm's own diagnostics.
-- `pause`, `resume`, `stop`, `state`, and `connect` act as before. A replay
-  verdict is `same`, `other_exit` (both codes), or `other_output` (stream
-  and first differing byte).
+- `pause`, `resume`, `stop`, `state`, and `connect` act as before.
+- `seek({ atNs, thread, event, watch }?)` returns a `SandboxPoint` (`ns`,
+  `thread`, `process`, `operations`, `event`, `at`, `stats`),
+  `step(options?)` (returning `null` at exit), `stat(path)`,
+  `listDir(path)`, and `readFile(path)`. Idle backend resources are
+  released automatically and restored transparently on the next query.
 - Calls and command waits take `{ signal }` for an `AbortSignal`. Aborting
   a wait leaves the command running.
 - The address is `DVM_API_URL`, the key is `DVM_API_KEY`, else the key

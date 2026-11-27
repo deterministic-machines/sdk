@@ -1,15 +1,15 @@
-"""dvm.run's Python SDK: sandboxes whose every run replays.
+"""dvm.run's Python SDK: sandboxes with point-in-time inspection.
 
-    from dvm import Sandbox, Execution
+    from dvm import Sandbox
 
     with Sandbox.create("python:3.12") as sbx:
         result = sbx.run(["python", "-c", "print(1 + 1)"])
-    verdict = Execution.get(sbx.id).replay().wait()
+        point = sbx.seek()
 
-``AsyncSandbox`` and ``AsyncExecution`` are the same, for asyncio.
+``AsyncSandbox`` and ``AsyncSandboxPoint`` are the same, for asyncio.
 """
 
-from dvm.blocking import Command, Execution, Replay, Sandbox
+from dvm.blocking import Command, Sandbox, SandboxPoint
 from dvm.errors import (
     ApiError,
     AuthenticationError,
@@ -17,11 +17,17 @@ from dvm.errors import (
     DvmError,
     InvalidRequestError,
     NotFoundError,
-    ReplayEndedError,
     SandboxEndedError,
     SandboxFailedError,
 )
-from dvm.execution import AsyncExecution, AsyncReplay, Output, Verdict
+from dvm.point import (
+    AsyncSandboxPoint,
+    DecodedArgument,
+    DirEntry,
+    FileStat,
+    Output,
+    StopEvent,
+)
 from dvm.run_state import RunState
 from dvm.sandbox import AsyncSandbox
 from dvm.sandbox_session import AsyncCommand, CommandResult
@@ -31,23 +37,23 @@ __version__ = "0.3.0"
 __all__ = [
     "ApiError",
     "AsyncCommand",
+    "AsyncSandbox",
+    "AsyncSandboxPoint",
+    "AuthenticationError",
     "Command",
     "CommandResult",
-    "AsyncExecution",
-    "AsyncReplay",
-    "AsyncSandbox",
-    "AuthenticationError",
     "ConflictError",
+    "DecodedArgument",
+    "DirEntry",
     "DvmError",
-    "Execution",
+    "FileStat",
     "InvalidRequestError",
     "NotFoundError",
     "Output",
-    "Replay",
-    "ReplayEndedError",
     "RunState",
     "Sandbox",
     "SandboxEndedError",
     "SandboxFailedError",
-    "Verdict",
+    "SandboxPoint",
+    "StopEvent",
 ]

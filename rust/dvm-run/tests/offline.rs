@@ -2,10 +2,12 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use dvm_run::api::{
-    ApiKey, CreatedApiKey, Me, Run, RunId, RunState, Sandbox, SandboxDraft, SandboxId, SandboxSpec,
-    StartedCliLogin, Timestamp,
+    ApiKey, CreatedApiKey, DvmStop, FileName, FileStatus, FileTime, FileType, Me,
+    PathDirectoryEntry, Run, RunId, RunState, Sandbox, SandboxDraft, SandboxId, SandboxSpec,
+    SeekSandbox, SeekTarget, StartedCliLogin, StepPoint, StopEvent, Timestamp, WatchPoint,
 };
 use dvm_run::{Client, Error};
+use std::collections::HashMap;
 use std::future::IntoFuture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,15 +26,14 @@ fn epoch() -> Timestamp {
 fn run(state: RunState) -> Run {
     Run {
         id: RunId::new(1),
-        replay_of: None,
         state,
         runner: Some("runner".to_owned()),
         created_at: epoch(),
         started_at: Some(epoch()),
         ended_at: None,
-        log_bytes: None,
-        log_outdated: false,
-        verdict: None,
+        has_timeline: false,
+        inspectable: true,
+        outdated: false,
         version: 1,
     }
 }
@@ -49,7 +50,6 @@ fn sandbox(state: RunState) -> Json<Sandbox> {
         owner: None,
         spec: SandboxSpec::try_from(draft).unwrap(),
         run: run(state),
-        replays: Vec::new(),
     })
 }
 
@@ -66,7 +66,7 @@ async fn an_already_exited_program_can_be_created_and_waited() {
                 get(|| async { sandbox(RunState::Exited { code: 3 }) }),
             )
             .route(
-                "/api/executions/1/output",
+                "/api/sandboxes/1/output",
                 get(|| async {
                     dvm_run::api::encode_frame(
                         &serde_json::json!({ "stdout": 2, "stderr": 0, "more": false, "cut": false }),
@@ -221,7 +221,7 @@ async fn output_follows_pages_and_advances_both_offsets() {
     let counted = asked.clone();
     let client = controller(Router::new()
         .route("/api/sandboxes/1", get(|| async { sandbox(RunState::Exited { code: 0 }) }))
-        .route("/api/executions/1/output", get(move |Query(query): Query<HashMap<String, usize>>| {
+        .route("/api/sandboxes/1/output", get(move |Query(query): Query<HashMap<String, usize>>| {
             let data = page.clone();
             let page = counted.fetch_add(1, Ordering::SeqCst);
             async move {
@@ -247,4 +247,128 @@ async fn output_follows_pages_and_advances_both_offsets() {
     assert_eq!(output.stdout.bytes(), [data.as_slice(), &[0, 255]].concat());
     assert_eq!(output.stderr.bytes(), [data.as_slice(), &[128]].concat());
     assert_eq!(asked.load(Ordering::SeqCst), 2);
+}
+
+fn sample_stop(thread: u64, event: u64, ns: u64, name: &str) -> DvmStop {
+    DvmStop {
+        thread,
+        process: 1,
+        operations: event,
+        event,
+        recording_ns: Some(ns),
+        at: StopEvent::Syscall {
+            number: 59,
+            name: name.to_owned(),
+            args: Default::default(),
+            decoded: Vec::new(),
+        },
+        stats: HashMap::from([("syscalls".to_owned(), event)]),
+    }
+}
+
+#[tokio::test]
+async fn seek_step_and_files_use_stateless_point_routes() {
+    use axum::extract::Query;
+
+    let step_calls = Arc::new(AtomicUsize::new(0));
+    let step_count = step_calls.clone();
+
+    let router = Router::new()
+        .route(
+            "/api/sandboxes/1",
+            get(|| async { sandbox(RunState::Exited { code: 0 }) }),
+        )
+        .route(
+            "/api/sandboxes/1/points/seek",
+            post(|Json(body): Json<SeekSandbox>| async move {
+                match body.target {
+                    SeekTarget::AtNs { ns } => Json(sample_stop(7, 10, ns, "openat")),
+                    SeekTarget::Event { thread, event } => {
+                        Json(sample_stop(thread, event, 500, "openat"))
+                    }
+                    SeekTarget::End => Json(sample_stop(7, 99, 999, "exit_group")),
+                }
+            }),
+        )
+        .route(
+            "/api/sandboxes/1/points/step",
+            post(move |Json(body): Json<StepPoint>| {
+                let n = step_count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    match n {
+                        0 => {
+                            assert_eq!((body.thread, body.event), (7, 10));
+                            Json(Some(sample_stop(7, 20, 900, "read")))
+                        }
+                        _ => {
+                            assert_eq!((body.thread, body.event), (7, 20));
+                            Json(None::<DvmStop>)
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/sandboxes/1/fs/stat",
+            get(|Query(query): Query<HashMap<String, String>>| async move {
+                assert_eq!(query["thread"], "7");
+                assert_eq!(query["event"], "10");
+                assert_eq!(query["path"], "/etc/hosts");
+                assert_eq!(query["follow_symlinks"], "false");
+                Json(FileStatus {
+                    kind: FileType::Regular,
+                    mode: 0o644,
+                    uid: 0,
+                    gid: 0,
+                    size: 5,
+                    links: 1,
+                    mtime: FileTime(0, 0),
+                    ctime: FileTime(0, 0),
+                    target: None,
+                    mount: None,
+                })
+            }),
+        )
+        .route(
+            "/api/sandboxes/1/fs/list",
+            get(|Query(query): Query<HashMap<String, String>>| async move {
+                assert_eq!(query["thread"], "7");
+                assert_eq!(query["event"], "10");
+                assert_eq!(query["path"], "/etc");
+                Json(vec![PathDirectoryEntry {
+                    name: "hosts".to_owned(),
+                    raw_name: FileName::from("hosts"),
+                    kind: FileType::Regular,
+                }])
+            }),
+        )
+        .route(
+            "/api/sandboxes/1/fs/read",
+            get(|Query(query): Query<HashMap<String, String>>| async move {
+                assert_eq!(query["thread"], "7");
+                assert_eq!(query["event"], "10");
+                assert_eq!(query["path"], "/etc/hosts");
+                b"hello".to_vec()
+            }),
+        );
+
+    let client = controller(router).await;
+    let sbx = client.connect_sandbox(SandboxId::new(1)).await.unwrap();
+    assert_eq!(sbx.spec().name(), "alpine");
+
+    let p1 = sbx
+        .seek_at_ns(500)
+        .watch(WatchPoint::FileSyscalls)
+        .await
+        .unwrap();
+    assert_eq!((p1.thread(), p1.event(), p1.ns()), (7, 10, Some(500)));
+
+    let p2 = p1.step().await.unwrap().expect("second stop");
+    assert_eq!(p2.event(), 20);
+    assert!(p2.step().await.unwrap().is_none());
+
+    let stat = p1.stat("/etc/hosts").follow_symlinks(false).await.unwrap();
+    assert_eq!(stat.size, 5);
+    assert_eq!(p1.list_dir("/etc").await.unwrap()[0].name, "hosts");
+    assert_eq!(p1.read_file("/etc/hosts").await.unwrap(), b"hello");
 }

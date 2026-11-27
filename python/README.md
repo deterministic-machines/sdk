@@ -14,16 +14,17 @@ no one is there to approve one, such as CI, make a key on
 [dvm.run's API keys page](https://sandbox.dvm.run/keys) and set
 `DVM_API_KEY`.
 
-A sandbox records its process from start to end. With no command or
-entrypoint it runs the sandbox server and takes commands; the image's own
-command does not run. Commands run as root, in the image's environment and
-working directory, with any environment you supply; a command's `user`
-runs it as another of the image's users. With a command or
-entrypoint it is one run of that program, and command and file methods
-raise `DvmError` without sending a request.
+A sandbox captures its execution from start to end so you can seek back
+and inspect its state later. With no command or entrypoint it runs the
+sandbox server and takes commands; the image's own command does not run.
+Commands run as root, in the image's environment and working directory,
+with any environment you supply; a command's `user` runs it as another of
+the image's users. With a command or entrypoint it is one run of that
+program, and command and file methods raise `DvmError` without sending a
+request.
 
 ```python
-from dvm import Sandbox, Execution
+from dvm import Sandbox
 
 with Sandbox.create("python:3.12") as sandbox:
     result = sandbox.run(["python", "-c", "print(2)"])
@@ -33,7 +34,9 @@ with Sandbox.create("python:3.12") as sandbox:
     server = sandbox.start("python -m http.server 8000")
     server.signal(15)
     server.wait()
-assert Execution.get(sandbox.id).replay().wait().same
+    sandbox.end()
+    point = sandbox.seek()
+    assert point.read_file("/tmp/a.txt") == b"hi"
 ```
 
 `run(command, *, env=None, cwd=None, stdin=None, user=None)` runs argv (a
@@ -79,11 +82,11 @@ flow control can wait up to 30 seconds, then refuse if the program is not
 reading; the SDK passes that error on without retrying.
 
 At scope end a command sandbox's input is ended and the SDK waits for its
-exit, so the recording replays. `end()` does this explicitly and returns
-the sandbox's exit code. EOF makes the server kill any commands still
-running and exit 0. A paused sandbox cannot read EOF, so scope end stops
-it instead. A sandbox with a supplied program is also stopped at scope
-end if still active. A stopped recording does not replay.
+exit, leaving it ready to inspect. `end()` does this explicitly and
+returns the sandbox's exit code. EOF makes the server kill any commands
+still running and exit 0. A paused sandbox cannot read EOF, so scope end
+stops it instead. A sandbox with a supplied program is also stopped at
+scope end if still active. A stopped sandbox cannot be sought.
 
 - Making a sandbox returns once its process started; one already exited
   is fine. `wait()` gives that process's exit code, including nonzero.
@@ -93,11 +96,15 @@ end if still active. A stopped recording does not replay.
 - `output()` returns raw process output. For command sandboxes, `stdout`
   is the server's answer frames. For a supplied program, dvm combines
   its stdout and stderr in `stdout`; `stderr` is dvm's own diagnostics.
-- `pause`, `resume` and `stop` act on an active sandbox. A replay's verdict
-  is `same`, `other_exit` (both codes) or `other_output` (the stream and the
-  first byte that differs).
-- `AsyncSandbox`, `AsyncCommand`, `AsyncExecution` and `AsyncReplay` have
-  the same methods for asyncio; blocking classes use those implementations.
+- `pause`, `resume` and `stop` act on an active sandbox.
+- `seek(at_ns=None, thread=None, event=None, watch=None)` returns a
+  `SandboxPoint` with metadata (`ns`, `thread`, `process`, `operations`,
+  `event`, `at`, `stats`), `step(watch=None)` (returning `None` after the
+  last event), `stat(path, follow_symlinks=True)`, `list_dir(path)`, and
+  `read_file(path)`. Resources are released automatically when idle and
+  restored transparently if queried again.
+- `AsyncSandbox` and `AsyncSandboxPoint` have the same methods for
+  asyncio; blocking classes use those implementations.
 - The address is `DVM_API_URL`, the key is `DVM_API_KEY`, else the key
   `dvm-run login` saved for that address; both can be given in code.
 
@@ -135,9 +142,9 @@ The provider names them `<task>-agent` and `<task>-grading`, cut to
 dvm.run's rule for names (63 lowercase letters, digits and `-`). Harbor has
 no role parameter, so the provider identifies grading by `__verifier__`
 in Harbor's `session_id`. Stop ends input and waits for exit, keeping the
-whole recording replayable; it stops the sandbox only if ending input
+completed sandbox inspectable; it stops the sandbox only if ending input
 fails or takes more than 30 seconds. Both values of Harbor's `delete`
-argument retain the execution recording. `sandbox_id` gives its replay ID.
+argument retain the sandbox history. `sandbox_id` gives its ID.
 
 dvm.run runs public prebuilt Linux images. The provider refuses missing
 images, image builds (including `force_build`), Docker Compose, multiple
@@ -175,7 +182,7 @@ nix develop -c bash -c 'cd python && uv run --no-project --with harbor --with py
 
 The first command skips the Harbor modules when Harbor is absent. The
 second runs them in a uv-managed environment without adding Harbor to the
-SDK's dependencies. To run only the oracle and replay test, set
+SDK's dependencies. To run only the oracle and inspection test, set
 `DVM_API_URL` and `DVM_API_KEY`, then run:
 
 ```sh
@@ -184,7 +191,7 @@ nix develop -c bash -c 'cd python && uv run --no-project --with harbor --with py
 
 That test uses `tests/harbor-task`, a tiny task on `python:3.12-slim`. It
 checks the oracle reward, the artifact handoff to separate grading, and
-that both complete sandbox executions replay `same`.
+that both completed sandboxes can be sought and inspected.
 
 ## Wire format
 

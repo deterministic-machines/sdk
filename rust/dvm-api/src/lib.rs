@@ -1,17 +1,12 @@
-//! dvm.run's REST API: what it takes and returns. dvm.run's controller
-//! serves it, and the SDKs and its panel call it; the controller, the panel
-//! and the Rust SDK check a sandbox's spec with the same code.
-//!
-//! A type that holds an invariant (a checked spec, an image reference) keeps
-//! its fields private; a plain record of what the controller answers has
-//! them public.
+//! dvm.run's REST API types and checked request drafts.
 
 mod api_key;
 mod capacity;
 mod cli_login;
-mod execution;
 mod frame;
+mod guest_files;
 mod image_reference;
+mod inspection;
 mod run;
 mod sandbox;
 mod sandbox_input;
@@ -23,14 +18,17 @@ mod user;
 pub use api_key::{ApiKey, CreatedApiKey, NewApiKey};
 pub use capacity::Capacity;
 pub use cli_login::{CliLogin, CollectCliLogin, NewCliLogin, StartedCliLogin};
-pub use execution::Execution;
 pub use frame::{
     Frame, FrameDecoder, FrameError, MAX_HEADER, MAX_PAYLOAD, decode_frame, encode_frame,
 };
+pub use guest_files::{FileName, FileStatus, FileTime, FileType, PathDirectoryEntry};
 pub use image_reference::{ImageReference, InvalidImageReference};
+pub use inspection::{
+    DecodedArgument, DecodedValue, DvmStop, InspectionWatches, SeekSandbox, SeekTarget, StepPoint,
+    StopEvent, SyscallName, WatchPoint, WatchPoints,
+};
 pub use run::{
-    ByteChunk, InvalidRunAction, OutputStream, ReplayVerdict, Run, RunAction, RunId, RunOutput,
-    RunState,
+    ByteChunk, InvalidRunAction, OutputStream, Run, RunAction, RunId, RunOutput, RunState,
 };
 pub use sandbox::{
     EnvironmentVariable, Sandbox, SandboxDraft, SandboxId, SandboxSpec, SandboxesPage, SpecError,
@@ -47,8 +45,6 @@ pub use user::{Me, UserLimits};
 
 use serde::{Deserialize, Serialize};
 
-/// What the controller answers instead, when it refuses a request: the body
-/// of every response that isn't a success.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
@@ -56,8 +52,6 @@ pub struct ApiError {
     pub message: String,
 }
 
-/// Writes every type's TypeScript, with the types it names, into
-/// `controller-api.ts` in `config`'s directory: the panel's API.
 #[cfg(feature = "typescript")]
 pub fn export_typescript(config: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     use ts_rs::TS;
@@ -67,30 +61,43 @@ pub fn export_typescript(config: &ts_rs::Config) -> Result<(), ts_rs::ExportErro
     Capacity::export_all(config)?;
     CliLogin::export_all(config)?;
     CreatedApiKey::export_all(config)?;
+    DecodedArgument::export_all(config)?;
+    DecodedValue::export_all(config)?;
+    DvmStop::export_all(config)?;
     EnvironmentVariable::export_all(config)?;
-    Execution::export_all(config)?;
+    FileName::export_all(config)?;
+    FileStatus::export_all(config)?;
+    FileTime::export_all(config)?;
+    FileType::export_all(config)?;
     ImageReference::export_all(config)?;
+    InspectionWatches::export_all(config)?;
     Me::export_all(config)?;
     NewApiKey::export_all(config)?;
     OutputStream::export_all(config)?;
-    ReplayVerdict::export_all(config)?;
+    PathDirectoryEntry::export_all(config)?;
     Run::export_all(config)?;
     RunAction::export_all(config)?;
     RunId::export_all(config)?;
     RunOutput::export_all(config)?;
-    SandboxInput::export_all(config)?;
-    SandboxInputState::export_all(config)?;
     RunState::export_all(config)?;
     Sandbox::export_all(config)?;
-    SandboxRequest::export_all(config)?;
     SandboxAnswer::export_all(config)?;
     SandboxDraft::export_all(config)?;
     SandboxId::export_all(config)?;
+    SandboxInput::export_all(config)?;
+    SandboxInputState::export_all(config)?;
     SandboxNetwork::export_all(config)?;
+    SandboxRequest::export_all(config)?;
     SandboxSpec::export_all(config)?;
     SandboxesPage::export_all(config)?;
+    SeekSandbox::export_all(config)?;
+    SeekTarget::export_all(config)?;
+    StopEvent::export_all(config)?;
+    SyscallName::export_all(config)?;
     Timestamp::export_all(config)?;
     UserLimits::export_all(config)?;
+    WatchPoint::export_all(config)?;
+    WatchPoints::export_all(config)?;
     Ok(())
 }
 
@@ -105,6 +112,8 @@ mod typescript_tests {
         std::fs::remove_dir_all(&directory).unwrap();
         for declaration in [
             "export type Sandbox = ",
+            "export type DvmStop = ",
+            "export type FileStatus = ",
             "export type ApiError = ",
             "export type Me = ",
             "export type SandboxRequest = ",

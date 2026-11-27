@@ -1,10 +1,10 @@
 //! The same program lifecycle exercised by all three SDKs.
-use dvm_run::api::RunState;
+use dvm_run::api::{FileType, RunState, WatchPoint};
 use dvm_run::{Client, Error};
 const IMAGE: &str = "alpine:3.20";
 
 macro_rules! scenarios {
-    ($client:path, $replay:expr $(, #[$attribute:meta])*) => {
+    ($client:path, $inspect:expr $(, #[$attribute:meta])*) => {
         crate::scenarios::scenarios!(@each $client [$(#[$attribute])*]
             a_program_returns_its_output_and_exit_code,
             entrypoint_and_environment,
@@ -16,7 +16,7 @@ macro_rules! scenarios {
         $(#[$attribute])*
         async fn a_command_session_ends_with_a_whole_recording() {
             let (_platform, client) = $client().await;
-            crate::scenarios::a_command_session_ends_with_a_whole_recording(&client, $replay).await;
+            crate::scenarios::a_command_session_ends_with_a_whole_recording(&client, $inspect).await;
         }
     };
     (@each $client:path [$($attribute:tt)*] $scenario:ident $(, $rest:ident)*) => {
@@ -43,16 +43,22 @@ pub async fn a_program_returns_its_output_and_exit_code(client: &Client) {
     let output = sandbox.output().await.unwrap();
     assert_eq!(output.stdout.bytes(), b"out\xfferr\n");
     assert_eq!(output.stderr.bytes(), b"");
-    let execution = client.execution(sandbox.id()).await.unwrap();
-    assert_eq!(execution.state(), &RunState::Exited { code: 3 });
+    assert_eq!(sandbox.state().await.unwrap(), RunState::Exited { code: 3 });
     assert_eq!(
-        (execution.spec().seed(), execution.spec().name()),
+        (sandbox.spec().seed(), sandbox.spec().name()),
         (7, "alpine")
     );
-    assert!(execution.log_bytes().is_some());
-    let mut replay = execution.replay().await.unwrap();
-    assert!(replay.wait().await.unwrap().is_same());
-    assert_eq!(replay.output().await.unwrap(), output);
+    let p1 = sandbox
+        .seek_at_ns(0)
+        .watch(WatchPoint::Processes)
+        .await
+        .unwrap();
+    let p2 = p1.step().await.unwrap().expect("next stop");
+    assert_ne!((p2.thread(), p2.event()), (p1.thread(), p1.event()));
+    let end = sandbox.seek_end().await.unwrap();
+    assert!(end.operations() > 0);
+    assert_eq!(end.stat("/").await.unwrap().kind, FileType::Directory);
+    assert!(!p1.list_dir("/").await.unwrap().is_empty());
     sandbox.stop().await.unwrap();
 }
 
@@ -90,7 +96,7 @@ pub async fn pause_resume_connect_and_stop(client: &Client) {
         })
     ));
     assert!(matches!(
-        client.execution(sandbox.id()).await.unwrap().replay().await,
+        sandbox.seek_end().await,
         Err(Error::Conflict { .. })
     ));
 }
@@ -107,7 +113,7 @@ pub async fn refusals_are_typed(client: &Client) {
     ));
 }
 
-pub async fn a_command_session_ends_with_a_whole_recording(client: &Client, replay: bool) {
+pub async fn a_command_session_ends_with_a_whole_recording(client: &Client, inspect: bool) {
     let sandbox = client
         .create_sandbox(IMAGE)
         .env("A", "inherited")
@@ -163,19 +169,20 @@ pub async fn a_command_session_ends_with_a_whole_recording(client: &Client, repl
         })
         .await
         .unwrap();
-    let execution = client.execution(id).await.unwrap();
-    assert_eq!(execution.state(), &RunState::Exited { code: 0 });
-    if replay {
-        assert!(
-            execution
-                .replay()
-                .await
-                .unwrap()
-                .wait()
-                .await
-                .unwrap()
-                .is_same()
+    assert_eq!(sandbox.state().await.unwrap(), RunState::Exited { code: 0 });
+    if inspect {
+        let start = sandbox
+            .seek_at_ns(1)
+            .watch(WatchPoint::FileSyscalls)
+            .await
+            .unwrap();
+        let next = start.step().await.unwrap().expect("stepped stop");
+        assert_ne!(
+            (next.thread(), next.event()),
+            (start.thread(), start.event())
         );
+        let end = sandbox.seek_end().await.unwrap();
+        assert!(!end.list_dir("/").await.unwrap().is_empty());
     }
 }
 

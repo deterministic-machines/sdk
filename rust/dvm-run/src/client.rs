@@ -11,7 +11,6 @@ use serde::de::DeserializeOwned;
 
 use crate::credentials;
 use crate::error::{Error, Result};
-use crate::execution::Execution;
 use crate::sandbox::{Sandbox, SandboxBuilder};
 
 pub const DEFAULT_API_URL: &str = "https://sandbox.dvm.run";
@@ -88,14 +87,6 @@ impl Client {
         Ok(Sandbox::new(self.clone(), sandbox, None))
     }
 
-    /// A sandbox's execution: everything it ran, under its id.
-    pub async fn execution(&self, id: SandboxId) -> Result<Execution> {
-        let execution = self
-            .json(Method::GET, &format!("/executions/{id}"), &[], None::<&()>)
-            .await?;
-        Ok(Execution::new(self.clone(), execution))
-    }
-
     /// The answer's JSON; an empty answer is `null`.
     pub(crate) async fn json<T: DeserializeOwned>(
         &self,
@@ -108,15 +99,30 @@ impl Client {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let bytes = self.send(path, request).await?.bytes().await;
-        let bytes = bytes.map_err(|error| Error::network(format!("reading {path}"), error))?;
-        let bytes = if bytes.is_empty() {
+        let bytes = self
+            .send(path, request)
+            .await?
+            .bytes()
+            .await
+            .map_err(|error| Error::network(format!("reading {path}"), error))?;
+        let slice = if bytes.is_empty() {
             &b"null"[..]
         } else {
             &bytes
         };
-        serde_json::from_slice(bytes)
+        serde_json::from_slice(slice)
             .map_err(|error| Error::Unexpected(format!("{path}'s answer: {error}")))
+    }
+
+    pub(crate) async fn get_bytes(&self, path: &str, query: Query<'_>) -> Result<Vec<u8>> {
+        let request = self.request(Method::GET, path, query).timeout(QUIET_LIMIT);
+        let bytes = self
+            .send(path, request)
+            .await?
+            .bytes()
+            .await
+            .map_err(|error| Error::network(format!("reading {path}"), error))?;
+        Ok(bytes.to_vec())
     }
 
     pub(crate) async fn input(
@@ -212,10 +218,12 @@ impl Client {
             return Ok(response);
         }
         let text = response.text().await.unwrap_or_default();
-        let reason = match serde_json::from_str::<ApiError>(&text) {
-            Ok(refusal) => refusal.message,
-            Err(_) if text.is_empty() => status.canonical_reason().unwrap_or("").to_owned(),
-            Err(_) => text,
+        let reason = if let Ok(refusal) = serde_json::from_str::<ApiError>(&text) {
+            refusal.message
+        } else if text.is_empty() {
+            status.canonical_reason().unwrap_or("").to_owned()
+        } else {
+            text
         };
         Err(Error::refusal(status.as_u16(), reason))
     }

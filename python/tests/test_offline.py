@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from dvm import AsyncSandbox, DvmError, SandboxEndedError, SandboxFailedError, Verdict
+from dvm import AsyncSandbox, DvmError, SandboxEndedError, SandboxFailedError
 from dvm.connection import Connection
 from dvm.frame import encode_frame
 
@@ -37,7 +37,7 @@ def test_wait_reports_stopped_and_failed(state, error):
 def test_output_keeps_every_byte():
     data = bytes(range(256))
     def answer(request):
-        assert request.url.path == "/api/executions/5/output"
+        assert request.url.path == "/api/sandboxes/5/output"
         return httpx.Response(200, content=encode_frame({"stdout": len(data), "stderr": 1, "more": False, "cut": False}, data + b"\0"))
     output = asyncio.run(sandbox_answered_by(answer).output())
     assert (output.stdout, output.stderr) == (data, b"\0")
@@ -51,11 +51,6 @@ def test_create_accepts_an_already_exited_program(monkeypatch):
         sandbox = await AsyncSandbox.create("alpine", command=["true"])
         await sandbox.close()
     asyncio.run(create())
-
-
-def test_verdict_has_only_program_details():
-    verdict = Verdict.from_api({"kind": "other_output", "stream": "stderr", "at": 7})
-    assert (verdict.stream, verdict.at, verdict.same) == ("stderr", 7, False)
 
 
 def test_a_key_is_needed(monkeypatch):
@@ -97,3 +92,83 @@ def test_output_follows_pages_and_advances_both_offsets():
     output = asyncio.run(sandbox_answered_by(answer).output())
     assert output.stdout == data + b"tail"
     assert output.stderr == data + b"\xfferr"
+
+
+def test_seek_step_and_files():
+    seeks = []
+    step_calls = 0
+
+    def stop(thread, event, ns, name):
+        return {
+            "thread": thread,
+            "process": 1,
+            "operations": event,
+            "event": event,
+            "recording_ns": ns,
+            "at": {
+                "syscall": {
+                    "number": 59,
+                    "name": name,
+                    "args": ["0x1", "0x2", "0x0", "0x0", "0x0", "0x0"],
+                    "decoded": [{"arg": 0, "path": "/bin/sh"}],
+                }
+            },
+            "stats": {"syscalls": event},
+        }
+
+    def answer(request):
+        nonlocal step_calls
+        path = request.url.path
+        if path == "/api/sandboxes/5/points/seek":
+            body = json.loads(request.content)
+            seeks.append(body)
+            target = body["target"]
+            if target["kind"] == "at_ns":
+                return httpx.Response(200, json=stop(7, 10, target["ns"], "openat"))
+            if target["kind"] == "event":
+                return httpx.Response(200, json=stop(target["thread"], target["event"], 500, "openat"))
+            return httpx.Response(200, json=stop(7, 99, 999, "exit_group"))
+        if path == "/api/sandboxes/5/points/step":
+            step_calls += 1
+            body = json.loads(request.content)
+            if step_calls == 1:
+                assert (body["thread"], body["event"]) == (7, 10)
+                return httpx.Response(200, json=stop(7, 20, 900, "read"))
+            assert (body["thread"], body["event"]) == (7, 20)
+            return httpx.Response(200, json=None)
+        if path == "/api/sandboxes/5/fs/stat":
+            assert dict(request.url.params) == {
+                "thread": "7",
+                "event": "10",
+                "path": "/etc/hosts",
+                "follow_symlinks": "false",
+            }
+            return httpx.Response(200, json={"type": "regular", "mode": 420, "uid": 0, "gid": 0, "size": 5, "links": 1, "mtime": [0, 0], "ctime": [0, 0]})
+        if path == "/api/sandboxes/5/fs/list":
+            assert dict(request.url.params) == {"thread": "7", "event": "10", "path": "/etc"}
+            return httpx.Response(200, json=[{"name": "hosts", "raw_name": "686f737473", "type": "regular"}])
+        if path == "/api/sandboxes/5/fs/read":
+            assert dict(request.url.params) == {"thread": "7", "event": "10", "path": "/etc/hosts"}
+            return httpx.Response(200, content=b"hello")
+        raise AssertionError(f"unexpected path {path}")
+
+    async def run():
+        sandbox = sandbox_answered_by(answer)
+        p1 = await sandbox.seek(at_ns=500, watch=["file-syscalls", "syscall:openat"])
+        assert (p1.thread, p1.event, p1.ns, p1.at.name) == (7, 10, 500, "openat")
+        assert p1.at.decoded[0].value == "/bin/sh"
+        p2 = await p1.step()
+        assert p2 is not None and p2.event == 20
+        assert await p2.step() is None
+        stat = await p1.stat("/etc/hosts", follow_symlinks=False)
+        assert stat.size == 5
+        entries = await p1.list_dir("/etc")
+        assert entries[0].raw_name == b"hosts"
+        assert await p1.read_file("/etc/hosts") == b"hello"
+        with pytest.raises(ValueError):
+            await sandbox.seek(at_ns=1, thread=1, event=1)
+        with pytest.raises(ValueError):
+            await sandbox.seek(thread=1)
+
+    asyncio.run(run())
+    assert [entry["target"] for entry in seeks] == [{"kind": "at_ns", "ns": 500}]

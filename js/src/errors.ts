@@ -28,7 +28,7 @@ export class InvalidRequestError extends ApiError {}
 /** 401: the API key was revoked, or isn't one. */
 export class AuthenticationError extends ApiError {}
 
-/** 404: no such sandbox, execution or replay, or not the key's user's. */
+/** 404: no such sandbox, or not the key's user's. */
 export class NotFoundError extends ApiError {}
 
 /** 409: what was asked can't be done in the state it's in. */
@@ -54,19 +54,5 @@ export class SandboxFailedError extends SandboxEndedError {
   constructor(sandboxId: number, state: RunState) {
     super(sandboxId, state, `sandbox ${sandboxId} failed: ${state.reason}`);
     this.reason = state.reason ?? "";
-  }
-}
-
-/** A replay ended without a verdict: dvm saw it part from its execution and
- * failed it, with where, or it was stopped. */
-export class ReplayEndedError extends DvmError {
-  readonly replayId: number;
-  readonly state: RunState;
-
-  constructor(replayId: number, state: RunState) {
-    const detail = state.reason ? `: ${state.reason}` : "";
-    super(`replay ${replayId} ${state.kind}${detail}`);
-    this.replayId = replayId;
-    this.state = state;
   }
 }

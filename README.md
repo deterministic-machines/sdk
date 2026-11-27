@@ -1,10 +1,11 @@
 # dvm.run SDKs
 
-Clients for [dvm.run](https://dvm.run): sandboxes whose every run
-replays. With no command or entrypoint, a sandbox takes commands and moves
-files through its SDK session. With either supplied, it is one run of that
-program. The whole session is one recorded execution, which replays once
-its input ends and the sandbox exits.
+Clients for [dvm.run](https://dvm.run): sandboxes with point-in-time
+inspection. With no command or entrypoint, a sandbox takes commands and
+moves files through its SDK session. With either supplied, it is one run
+of that program. Once it exits cleanly, you can seek to any point in its
+history, step through events, and inspect its filesystem while backend
+resources are managed automatically.
 
 | Language | Directory | Package |
 | --- | --- | --- |
@@ -32,7 +33,7 @@ whole input stream, including frame headers. The SDKs split stdin and
 file writes into payloads of at most 1 MiB, then split each frame across
 HTTP input bodies as needed.
 
-`GET /api/executions/{id}/output?offset=N&stderr_offset=M` returns
+`GET /api/sandboxes/{id}/output?offset=N&stderr_offset=M` returns
 `application/octet-stream`: one frame with a header containing stdout
 and stderr lengths and `more`, followed by stdout bytes then stderr
 bytes. For example, `{"stdout":2,"stderr":0,"more":false,"bytes":2}`

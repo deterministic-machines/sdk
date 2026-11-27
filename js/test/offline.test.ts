@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Connection } from "../src/connection.ts";
 import { DvmError, SandboxEndedError, SandboxFailedError } from "../src/errors.ts";
-import { Verdict } from "../src/execution.ts";
 import { Sandbox } from "../src/sandbox.ts";
 import { withEnvironment } from "./environment.ts";
 
@@ -36,7 +35,7 @@ for (const [state, error] of [
 test("output keeps every byte", async () => {
   const bytes = Uint8Array.from({ length: 256 }, (_, byte) => byte);
   const sandbox = sandboxAnswering((request) => {
-    assert.equal(new URL(request.url).pathname, "/api/executions/5/output");
+    assert.equal(new URL(request.url).pathname, "/api/sandboxes/5/output");
     return new Response(encodeFrame({ stdout: bytes.length, stderr: 1, more: false, cut: false }, new Uint8Array([...bytes, 0])));
   });
   assert.deepEqual(await sandbox.output(), { stdout: bytes, stderr: new Uint8Array([0]) });
@@ -50,11 +49,6 @@ test("create accepts an already exited program", async () => {
   } finally {
     globalThis.fetch = original;
   }
-});
-
-test("verdict has only program details", () => {
-  const verdict = new Verdict({ kind: "other_output", stream: "stderr", at: 7 });
-  assert.deepEqual([verdict.stream, verdict.at, verdict.same], ["stderr", 7, false]);
 });
 
 test("a key is needed", async () => {
@@ -105,4 +99,83 @@ test("output follows pages and advances both offsets", async () => {
   assert.deepEqual(output.stdout.slice(-2), new Uint8Array([0, 255]));
   assert.deepEqual(output.stderr.slice(-1), new Uint8Array([128]));
   assert.equal(pages.length, 0);
+});
+
+test("seek, step, and files use stateless point routes", async () => {
+  const seeks: unknown[] = [];
+  let stepCalls = 0;
+
+  const stop = (thread: number, event: number, ns: number, name: string) => ({
+    thread,
+    process: 1,
+    operations: event,
+    event,
+    recording_ns: ns,
+    at: {
+      syscall: {
+        number: 59,
+        name,
+        args: ["0x1", "0x2", "0x0", "0x0", "0x0", "0x0"],
+        decoded: [{ arg: 0, path: "/bin/sh" }],
+      },
+    },
+    stats: { syscalls: event },
+  });
+
+  const sandbox = sandboxAnswering(async (request) => {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/sandboxes/5/points/seek") {
+      const body = (await request.json()) as {
+        target: { kind: string; ns?: number; thread?: number; event?: number };
+      };
+      seeks.push(body);
+      const target = body.target;
+      if (target.kind === "at_ns") return Response.json(stop(7, 10, target.ns!, "openat"));
+      if (target.kind === "event") return Response.json(stop(target.thread!, target.event!, 500, "openat"));
+      return Response.json(stop(7, 99, 999, "exit_group"));
+    }
+    if (url.pathname === "/api/sandboxes/5/points/step") {
+      stepCalls += 1;
+      const body = (await request.json()) as { thread: number; event: number };
+      if (stepCalls === 1) {
+        assert.deepEqual([body.thread, body.event], [7, 10]);
+        return Response.json(stop(7, 20, 900, "read"));
+      }
+      assert.deepEqual([body.thread, body.event], [7, 20]);
+      return Response.json(null);
+    }
+    if (url.pathname === "/api/sandboxes/5/fs/stat") {
+      assert.equal(url.searchParams.get("thread"), "7");
+      assert.equal(url.searchParams.get("event"), "10");
+      assert.equal(url.searchParams.get("path"), "/etc/hosts");
+      assert.equal(url.searchParams.get("follow_symlinks"), "false");
+      return Response.json({ type: "regular", mode: 420, uid: 0, gid: 0, size: 5, links: 1, mtime: [0, 0], ctime: [0, 0] });
+    }
+    if (url.pathname === "/api/sandboxes/5/fs/list") {
+      assert.equal(url.searchParams.get("thread"), "7");
+      assert.equal(url.searchParams.get("event"), "10");
+      assert.equal(url.searchParams.get("path"), "/etc");
+      return Response.json([{ name: "hosts", raw_name: "686f737473", type: "regular" }]);
+    }
+    if (url.pathname === "/api/sandboxes/5/fs/read") {
+      assert.equal(url.searchParams.get("thread"), "7");
+      assert.equal(url.searchParams.get("event"), "10");
+      assert.equal(url.searchParams.get("path"), "/etc/hosts");
+      return new Response("hello");
+    }
+    throw new Error(`unexpected request ${url.pathname}`);
+  });
+
+  const p1 = await sandbox.seek({ atNs: 500, watch: ["file-syscalls", "syscall:openat"] });
+  assert.deepEqual([p1.thread, p1.event, p1.ns, p1.at.name], [7, 10, 500, "openat"]);
+  const p2 = await p1.step();
+  assert.ok(p2 !== null);
+  assert.equal(p2.event, 20);
+  assert.equal(await p2.step(), null);
+  assert.equal((await p1.stat("/etc/hosts", { followSymlinks: false })).size, 5);
+  assert.deepEqual((await p1.listDir("/etc"))[0]?.rawName, new TextEncoder().encode("hosts"));
+  assert.deepEqual(await p1.readFile("/etc/hosts"), new TextEncoder().encode("hello"));
+  await assert.rejects(() => sandbox.seek({ atNs: 1, thread: 1, event: 1 }), DvmError);
+  await assert.rejects(() => sandbox.seek({ thread: 1 }), DvmError);
+  assert.deepEqual(seeks.map((s) => (s as { target: unknown }).target), [{ kind: "at_ns", ns: 500 }]);
 });

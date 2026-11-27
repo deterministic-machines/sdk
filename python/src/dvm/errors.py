@@ -27,7 +27,7 @@ class AuthenticationError(ApiError):
 
 
 class NotFoundError(ApiError):
-    """404: no such sandbox, execution or replay, or not the key's user's."""
+    """404: no such sandbox, or not the key's user's."""
 
 
 class ConflictError(ApiError):
@@ -52,14 +52,3 @@ class SandboxFailedError(SandboxEndedError):
         self.sandbox_id = sandbox_id
         self.state = state
         self.reason = state.reason
-
-
-class ReplayEndedError(DvmError):
-    """A replay ended without a verdict: dvm saw it part from its execution
-    and failed it, with where, or it was stopped."""
-
-    def __init__(self, replay_id: int, state: RunState) -> None:
-        detail = f": {state.reason}" if state.reason else ""
-        super().__init__(f"replay {replay_id} {state.kind}{detail}")
-        self.replay_id = replay_id
-        self.state = state

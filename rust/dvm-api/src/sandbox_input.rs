@@ -2,24 +2,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ByteChunk, FrameError, RunOutput, decode_frame, encode_frame};
 
-/// The query of `POST /api/sandboxes/{id}/input`, whose body is the bytes
-/// to append at `offset`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
 pub struct SandboxInput {
     pub offset: u64,
-    /// Closes stdin after the bytes; further input is refused.
     #[serde(default)]
     pub end: bool,
 }
 
 impl SandboxInput {
-    /// The most bytes in one input request.
     pub const MAX_CHUNK_BYTES: usize = 64 * 1024;
 }
 
-/// The input accepted into the runner connection, which may still be in flight.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export_to = "controller-api.ts"))]
@@ -28,16 +23,10 @@ pub struct SandboxInputState {
     pub ended: bool,
 }
 
-/// Output after the stdout cursor `offset` and optional `stderr_offset`, as
-/// `GET /api/executions/{id}/output` answers it: a frame whose bytes are
-/// stdout's, then stderr's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputAfter {
     pub output: RunOutput,
-    /// Whether the run can still write output.
     pub more: bool,
-    /// Whether the answer stops short of what the run has written: the rest
-    /// is there to ask for from its end.
     pub cut: bool,
 }
 

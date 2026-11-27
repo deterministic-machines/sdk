@@ -1,7 +1,12 @@
-import type { ApiRun, ApiSandbox } from "./api-json.ts";
+import type {
+  ApiRun,
+  ApiSandbox,
+  ApiSeekTarget,
+  ApiSpec,
+} from "./api-json.ts";
 import { type CallOptions, type ClientOptions, Connection } from "./connection.ts";
 import { ConflictError, DvmError } from "./errors.ts";
-import { type Output, readOutput } from "./execution.ts";
+import { type Output, readOutput, SandboxPoint, type SeekOptions, seekPoint } from "./point.ts";
 import { RunState } from "./run-state.ts";
 import { endedErrorOf, SandboxCalls } from "./sandbox-calls.ts";
 import { Command, type CommandOptions, type CommandResult, SandboxSession, type WriteFileOptions } from "./sandbox-session.ts";
@@ -35,23 +40,30 @@ function networkOf(network: NetworkMode | undefined, allow: string[] | undefined
   return { mode };
 }
 
+export type SandboxSpec = Pick<ApiSpec, "name"> & Partial<ApiSpec>;
+
 export class Sandbox implements AsyncDisposable {
-  /** Its execution's id too. */
   readonly id: number;
   readonly name: string;
   readonly #calls: SandboxCalls;
   readonly #takesCommands: boolean;
   readonly #inputOffset: number | undefined;
+  #spec: SandboxSpec;
   #session?: SandboxSession;
 
   /** A handle, over `connection`, to the sandbox the API answered with:
    * `Sandbox.create` and `Sandbox.connect` make one. */
-  constructor(connection: Connection, sandbox: { id: number; spec: { name: string; command?: string[]; entrypoint?: string | null } }, inputOffset?: number) {
+  constructor(connection: Connection, sandbox: { id: number; spec: SandboxSpec }, inputOffset?: number) {
     this.id = sandbox.id;
     this.name = sandbox.spec.name;
+    this.#spec = { ...sandbox.spec };
     this.#calls = new SandboxCalls(connection, sandbox.id);
     this.#takesCommands = !sandbox.spec.command?.length && sandbox.spec.entrypoint == null;
     this.#inputOffset = inputOffset;
+  }
+
+  get spec(): SandboxSpec {
+    return { ...this.#spec };
   }
 
   /** A sandbox of `image` (as `docker run` takes it), once it's running.
@@ -109,10 +121,13 @@ export class Sandbox implements AsyncDisposable {
   async setNetwork(network: NetworkMode, allow?: string[], options: CallOptions = {}): Promise<void> {
     const calls = this.#calls;
     const body = networkOf(network, allow);
-    await calls.whileLive(() => calls.connection.json("PUT", `${calls.path}/network`, { ...options, body }));
+    const updated = await calls.whileLive(() =>
+      calls.connection.json<ApiSandbox>("PUT", `${calls.path}/network`, { ...options, body }),
+    );
+    if (updated?.spec) this.#spec = { ...updated.spec };
   }
 
-  /** Stops an active run. Its cut recording cannot replay. */
+  /** Stops an active run. */
   async stop(options: CallOptions = {}): Promise<void> {
     const calls = this.#calls;
     let run: ApiRun;
@@ -164,7 +179,22 @@ export class Sandbox implements AsyncDisposable {
 
   /** Raw process output; a command sandbox's stdout is server answer frames. */
   async output(options: CallOptions = {}): Promise<Output> {
-    return readOutput(this.#calls.connection, `/executions/${this.id}/output`, options);
+    return readOutput(this.#calls.connection, `${this.#calls.path}/output`, options);
+  }
+
+  async seek(options: SeekOptions = {}): Promise<SandboxPoint> {
+    const { atNs, thread, event, watch, signal } = options;
+    if (atNs !== undefined && (thread !== undefined || event !== undefined)) {
+      throw new DvmError("pass atNs or thread and event, not both");
+    }
+    if ((thread === undefined) !== (event === undefined)) {
+      throw new DvmError("thread and event must be passed together");
+    }
+    let target: ApiSeekTarget;
+    if (atNs !== undefined) target = { kind: "at_ns", ns: atNs };
+    else if (thread !== undefined && event !== undefined) target = { kind: "event", thread, event };
+    else target = { kind: "end" };
+    return seekPoint(this.#calls.connection, this.id, target, watch, signal);
   }
 
   /** `await using` ends input and waits; paused or supplied programs stop. */
