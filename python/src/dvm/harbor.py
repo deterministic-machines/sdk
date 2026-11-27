@@ -37,7 +37,7 @@ def sandbox_name(task: str, role: str) -> str:
 
 
 class DvmEnvironment(BaseEnvironment):
-    """One public prebuilt Linux image, with a complete replayable recording."""
+    """One public prebuilt Linux image, with inspectable sandbox history."""
 
     def __init__(self, *args, **kwargs):
         self._sandbox: AsyncSandbox | None = None
@@ -82,7 +82,7 @@ class DvmEnvironment(BaseEnvironment):
 
     @property
     def sandbox_id(self) -> int | None:
-        """The execution ID to replay after stop; retained after closing."""
+        """The sandbox ID to inspect after stop; retained after closing."""
         return self._sandbox.id if self._sandbox is not None else None
 
     def _running_sandbox(self) -> AsyncSandbox:

@@ -271,7 +271,7 @@ export class SandboxSession {
     const decoder = new FrameDecoder();
     try {
       for (;;) {
-        const output = decodeOutput(await this.#calls.connection.bytes(`/executions/${this.#calls.id}/output`, {
+        const output = decodeOutput(await this.#calls.connection.bytes(`${this.#calls.path}/output`, {
           query: { offset, stderr_offset: stderrOffset }, signal: this.#reading.signal,
         }));
         offset += output.stdout.length;

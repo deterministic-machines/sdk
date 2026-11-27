@@ -4,8 +4,8 @@ import os
 import uuid
 import pytest
 from conftest import IMAGE
-from dvm import (AsyncExecution, AsyncSandbox, AuthenticationError, ConflictError,
-                 DvmError, Execution, InvalidRequestError, Sandbox, SandboxEndedError)
+from dvm import (AsyncSandbox, AuthenticationError, ConflictError,
+                 DvmError, InvalidRequestError, Sandbox, SandboxEndedError)
 
 pytestmark = pytest.mark.platform
 
@@ -15,13 +15,14 @@ def test_a_program_returns_its_output_and_exit_code():
         assert sandbox.wait() == 3
         output = sandbox.output()
         assert (output.stdout, output.stderr) == (b"out\xfferr\n", b"")
-    execution = Execution.get(sandbox.id)
-    assert (execution.state.kind, execution.spec["seed"], execution.spec["name"]) == ("exited", 7, "alpine")
-    assert execution.log_bytes is not None
-    replay = execution.replay()
-    assert replay.wait().same
-    assert replay.output() == output
-    execution.close()
+        assert (sandbox.state().kind, sandbox.spec["seed"], sandbox.spec["name"]) == ("exited", 7, "alpine")
+        p1 = sandbox.seek(at_ns=0, watch=["processes"])
+        p2 = p1.step()
+        assert p2 is not None and (p2.thread, p2.event) != (p1.thread, p1.event)
+        end = sandbox.seek()
+        assert end.operations > 0
+        assert end.stat("/").type == "directory"
+        assert p1.list_dir("/")
 
 
 def test_entrypoint_and_environment():
@@ -42,10 +43,8 @@ def test_pause_resume_connect_and_stop():
         with pytest.raises(SandboxEndedError):
             sandbox.wait()
         connected.close()
-    execution = Execution.get(sandbox.id)
-    with pytest.raises(ConflictError):
-        execution.replay()
-    execution.close()
+        with pytest.raises(ConflictError):
+            sandbox.seek()
 
 
 def test_the_async_api_is_the_same():
@@ -53,9 +52,8 @@ def test_the_async_api_is_the_same():
         async with await AsyncSandbox.create(IMAGE, command=["echo", "async"]) as sandbox:
             assert await sandbox.wait() == 0
             assert (await sandbox.output()).stdout == b"async\n"
-        execution = await AsyncExecution.get(sandbox.id)
-        assert (await (await execution.replay()).wait()).same
-        await execution.close()
+            point = await sandbox.seek()
+            assert (await point.stat("/")).type == "directory"
     asyncio.run(run())
 
 
@@ -91,11 +89,13 @@ def test_a_command_session_ends_with_a_whole_recording():
         connected = Sandbox.connect(sandbox.id)
         assert connected.run("printf connected").stdout == b"connected"
         connected.close()
-    execution = Execution.get(sandbox.id)
-    assert (execution.state.kind, execution.state.exit_code) == ("exited", 0)
-    if os.environ.get("DVM_TEST_SESSION_REPLAY") == "1":
-        assert execution.replay().wait().same
-    execution.close()
+    with Sandbox.connect(sandbox.id) as ended:
+        assert (ended.state().kind, ended.state().exit_code) == ("exited", 0)
+        if os.environ.get("DVM_TEST_SESSION_INSPECT") == "1":
+            start = ended.seek(at_ns=1, watch=["file-syscalls"])
+            nxt = start.step()
+            assert nxt is not None and (nxt.thread, nxt.event) != (start.thread, start.event)
+            assert ended.seek().list_dir("/")
 
 
 def test_new_methods_refuse_a_sandbox_with_a_command():
@@ -125,6 +125,4 @@ def test_commands_run_as_a_user_and_the_network_changes_as_the_sandbox_runs():
             sandbox.set_network("allowlist", ["169.254.169.254"])
         metadata = sandbox.run("wget -q -T 5 -O - http://169.254.169.254/ 2>&1")
         assert b"unreachable" in metadata.stdout
-        execution = Execution.get(sandbox.id)
-        assert execution.spec["network"] == {"mode": "allowlist", "allow": ["pypi.org"]}
-        execution.close()
+        assert sandbox.spec["network"] == {"mode": "allowlist", "allow": ["pypi.org"]}

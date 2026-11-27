@@ -1,7 +1,7 @@
 {
   "name": "dvm-run",
   "version": "0.3.0",
-  "description": "Sandboxes whose every run replays: dvm.run's JavaScript SDK",
+  "description": "Sandboxes with point-in-time inspection: dvm.run's JavaScript SDK",
   "license": "Apache-2.0",
   "homepage": "https://dvm.run",
   "repository": {

@@ -9,7 +9,13 @@ import threading
 from collections.abc import Sequence
 from typing import Any, Coroutine, Mapping, Optional, TypeVar
 
-from dvm.execution import AsyncExecution, AsyncReplay, Output, Verdict
+from dvm.point import (
+    AsyncSandboxPoint,
+    DirEntry,
+    FileStat,
+    Output,
+    StopEvent,
+)
 from dvm.run_state import RunState
 from dvm.sandbox import AsyncSandbox
 from dvm.sandbox_session import AsyncCommand, CommandResult
@@ -49,15 +55,18 @@ _run = _EventLoopThread().run
 
 class Sandbox:
     """A sandbox, from ``Sandbox.create(image)``, or another process's,
-    from ``Sandbox.connect(sandbox_id)``. Its ``id`` is its execution's too.
-    With no command or entrypoint it takes commands, and its context ends
-    input and waits for exit. A paused sandbox or a supplied program is
-    stopped at the end instead."""
+    from ``Sandbox.connect(sandbox_id)``. With no command or entrypoint it
+    takes commands, and its context ends input and waits for exit. A paused
+    sandbox or a supplied program is stopped at the end instead."""
 
     def __init__(self, sandbox: AsyncSandbox) -> None:
         self._sandbox = sandbox
         self.id = sandbox.id
         self.name = sandbox.name
+
+    @property
+    def spec(self) -> dict[str, Any]:
+        return self._sandbox.spec
 
     @classmethod
     def create(
@@ -120,7 +129,7 @@ class Sandbox:
         _run(self._sandbox.resume())
 
     def stop(self) -> None:
-        """Stops it if active; its cut recording cannot replay."""
+        """Stops it if active."""
         _run(self._sandbox.stop())
 
     def wait(self) -> int:
@@ -158,6 +167,22 @@ class Sandbox:
         """Raw process output: server answer frames for a command sandbox."""
         return _run(self._sandbox.output())
 
+    def seek(
+        self,
+        *,
+        at_ns: Optional[int] = None,
+        thread: Optional[int] = None,
+        event: Optional[int] = None,
+        watch: Optional[Sequence[Any]] = None,
+    ) -> SandboxPoint:
+        return SandboxPoint(
+            _run(
+                self._sandbox.seek(
+                    at_ns=at_ns, thread=thread, event=event, watch=watch
+                )
+            )
+        )
+
     def close(self) -> None:
         _run(self._sandbox.close())
 
@@ -166,6 +191,55 @@ class Sandbox:
 
     def __exit__(self, *_: object) -> None:
         _run(self._sandbox.__aexit__())
+
+
+class SandboxPoint:
+    """One point in a sandbox's execution history (:class:`AsyncSandboxPoint`)."""
+
+    def __init__(self, point: AsyncSandboxPoint) -> None:
+        self._point = point
+        self.sandbox_id = point.sandbox_id
+
+    @property
+    def thread(self) -> int:
+        return self._point.thread
+
+    @property
+    def process(self) -> int:
+        return self._point.process
+
+    @property
+    def operations(self) -> int:
+        return self._point.operations
+
+    @property
+    def event(self) -> int:
+        return self._point.event
+
+    @property
+    def ns(self) -> Optional[int]:
+        return self._point.ns
+
+    @property
+    def at(self) -> StopEvent:
+        return self._point.at
+
+    @property
+    def stats(self) -> dict[str, int]:
+        return self._point.stats
+
+    def step(self, *, watch: Optional[Sequence[Any]] = None) -> Optional[SandboxPoint]:
+        next_point = _run(self._point.step(watch=watch))
+        return SandboxPoint(next_point) if next_point is not None else None
+
+    def read_file(self, path: str) -> bytes:
+        return _run(self._point.read_file(path))
+
+    def list_dir(self, path: str) -> list[DirEntry]:
+        return _run(self._point.list_dir(path))
+
+    def stat(self, path: str, *, follow_symlinks: bool = True) -> FileStat:
+        return _run(self._point.stat(path, follow_symlinks=follow_symlinks))
 
 
 class Command:
@@ -185,56 +259,3 @@ class Command:
 
     def close_stdin(self) -> None:
         _run(self._command.close_stdin())
-
-
-class Execution:
-    """A sandbox's execution, from ``Execution.get(sandbox_id)`` (:class:`AsyncExecution`)."""
-
-    def __init__(self, execution: AsyncExecution) -> None:
-        self._execution = execution
-        self.id = execution.id
-        self.spec = execution.spec
-        self.state = execution.state
-        self.log_bytes = execution.log_bytes
-        self.replays = [Replay(replay) for replay in execution.replays]
-
-    @classmethod
-    def get(
-        cls,
-        execution_id: int,
-        *,
-        api_key: Optional[str] = None,
-        api_url: Optional[str] = None,
-    ) -> Execution:
-        return cls(_run(AsyncExecution.get(execution_id, api_key=api_key, api_url=api_url)))
-
-    def replay(self) -> Replay:
-        return Replay(_run(self._execution.replay()))
-
-    def close(self) -> None:
-        _run(self._execution.close())
-
-
-class Replay:
-    """A replay of an execution (:class:`AsyncReplay`)."""
-
-    def __init__(self, replay: AsyncReplay) -> None:
-        self._replay = replay
-        self.id = replay.id
-
-    @property
-    def state(self) -> RunState:
-        return self._replay.state
-
-    @property
-    def verdict(self) -> Optional[Verdict]:
-        return self._replay.verdict
-
-    def wait(self) -> Verdict:
-        return _run(self._replay.wait())
-
-    def stop(self) -> None:
-        _run(self._replay.stop())
-
-    def output(self) -> Output:
-        return _run(self._replay.output())

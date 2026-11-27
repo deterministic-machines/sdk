@@ -1,4 +1,4 @@
-"""Harbor's oracle, artifact handoff, grading, and both complete replays."""
+"""Harbor's oracle, artifact handoff, grading, and inspectable history."""
 
 import asyncio
 import os
@@ -11,7 +11,7 @@ pytest.importorskip("harbor")
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 
-from dvm import AsyncExecution
+from dvm import AsyncSandbox
 from dvm.harbor import DvmEnvironment
 
 
@@ -20,7 +20,7 @@ from dvm.harbor import DvmEnvironment
     not (os.environ.get("DVM_API_URL") and os.environ.get("DVM_API_KEY")),
     reason="needs DVM_API_URL and DVM_API_KEY",
 )
-def test_oracle_reward_and_both_recordings_replay_same(tmp_path, monkeypatch):
+def test_oracle_reward_and_both_recordings_are_inspectable(tmp_path, monkeypatch):
     environments = []
     original_start = DvmEnvironment.start
 
@@ -44,13 +44,14 @@ def test_oracle_reward_and_both_recordings_replay_same(tmp_path, monkeypatch):
         assert len(environments) == 2
         names = set()
         for environment in environments:
-            execution = await AsyncExecution.get(environment.sandbox_id)
+            sandbox = await AsyncSandbox.connect(environment.sandbox_id)
             try:
-                names.add(execution.spec["name"])
-                assert execution.state.kind == "exited"
-                assert (await (await execution.replay()).wait()).same
+                names.add(sandbox.name)
+                assert (await sandbox.state()).kind == "exited"
+                point = await sandbox.seek()
+                assert (await point.stat("/")).type == "directory"
             finally:
-                await execution.close()
+                await sandbox.close()
         assert names == {"harbor-replay-agent", "harbor-replay-grading"}
 
     asyncio.run(run())

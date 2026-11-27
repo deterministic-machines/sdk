@@ -1,15 +1,17 @@
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dvm_api::{
     EnvironmentVariable, Run, RunOutput, RunState, SandboxDraft, SandboxId, SandboxNetwork,
+    SandboxSpec, SeekTarget,
 };
 use reqwest::Method;
 
 use crate::client::Client;
 use crate::command::{CommandLine, RunBuilder, StartBuilder, WriteFileBuilder, no_commands};
 use crate::error::{Error, Result};
+use crate::point::SeekBuilder;
 use crate::sandbox_session::Session;
 
 /// A sandbox, from [`Client::create_sandbox`] or [`Client::connect_sandbox`].
@@ -18,7 +20,7 @@ use crate::sandbox_session::Session;
 #[derive(Clone, Debug)]
 pub struct Sandbox {
     calls: SandboxCalls,
-    name: String,
+    spec: Arc<Mutex<SandboxSpec>>,
     session: Option<Arc<Session>>,
 }
 
@@ -135,18 +137,21 @@ impl Sandbox {
             .then(|| Session::new(calls.clone(), input_offset));
         Self {
             calls,
-            name: sandbox.spec.name().to_owned(),
+            spec: Arc::new(Mutex::new(sandbox.spec)),
             session,
         }
     }
 
-    /// Its execution's id too.
     pub fn id(&self) -> SandboxId {
         self.calls.id
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
+    pub fn name(&self) -> String {
+        self.spec.lock().unwrap().name().to_owned()
+    }
+
+    pub fn spec(&self) -> SandboxSpec {
+        self.spec.lock().unwrap().clone()
     }
 
     /// Where it is: queued, running, paused, exited, stopped, failed.
@@ -166,18 +171,19 @@ impl Sandbox {
     pub async fn set_network(&self, network: &SandboxNetwork) -> Result<()> {
         let calls = &self.calls;
         let path = format!("{}/network", calls.path);
-        calls
+        let updated = calls
             .while_live(calls.client.json::<dvm_api::Sandbox>(
                 Method::PUT,
                 &path,
                 &[],
                 Some(network),
             ))
-            .await
-            .map(drop)
+            .await?;
+        *self.spec.lock().unwrap() = updated.spec;
+        Ok(())
     }
 
-    /// Stops an active run. Its cut recording cannot replay.
+    /// Stops an active run.
     pub async fn stop(&self) -> Result<()> {
         let calls = &self.calls;
         let stop = format!("{}/stop", calls.path);
@@ -250,8 +256,20 @@ impl Sandbox {
 
     /// Raw process output. A command sandbox's stdout is server answer frames.
     pub async fn output(&self) -> Result<RunOutput> {
-        let path = format!("/executions/{}/output", self.id());
+        let path = format!("{}/output", self.calls.path);
         self.calls.client.output(&path).await
+    }
+
+    pub fn seek(&self, target: SeekTarget) -> SeekBuilder {
+        SeekBuilder::new(self.calls.client.clone(), self.calls.id, target)
+    }
+
+    pub fn seek_end(&self) -> SeekBuilder {
+        self.seek(SeekTarget::End)
+    }
+
+    pub fn seek_at_ns(&self, ns: u64) -> SeekBuilder {
+        self.seek(SeekTarget::AtNs { ns })
     }
 
     /// Ends input and waits at scope end, including cancellation. A paused

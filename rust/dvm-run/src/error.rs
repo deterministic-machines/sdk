@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dvm_api::{RunId, RunState, SandboxId};
+use dvm_api::{RunState, SandboxId};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -17,8 +17,7 @@ pub enum Error {
     /// 401: the API key was revoked, or isn't one.
     #[error("401: {reason}")]
     Authentication { reason: String },
-    /// 404: no such sandbox, execution or replay, or not the key's
-    /// user's.
+    /// 404: no such sandbox, or not the key's user's.
     #[error("404: {reason}")]
     NotFound { reason: String },
     /// 409: what was asked can't be done in the state it's in.
@@ -35,10 +34,6 @@ pub enum Error {
     /// serve, a limit, its runner going away.
     #[error("sandbox {sandbox} failed: {reason}")]
     SandboxFailed { sandbox: SandboxId, reason: String },
-    /// A replay ended without a verdict: dvm saw it part from its execution
-    /// and failed it, with where, or it was stopped.
-    #[error("replay {replay} {}{}", state.kind(), failure_of(state))]
-    ReplayEnded { replay: RunId, state: RunState },
     /// No key was given, in DVM_API_KEY, or saved by `dvm-run login`.
     #[error("no API key for {api_url}: run `dvm-run login`, or set DVM_API_KEY")]
     NoApiKey { api_url: String },
@@ -85,12 +80,5 @@ impl Error {
             context: context.into(),
             source: Some(Arc::new(source)),
         }
-    }
-}
-
-fn failure_of(state: &RunState) -> String {
-    match state {
-        RunState::Failed { reason } => format!(": {reason}"),
-        _ => String::new(),
     }
 }

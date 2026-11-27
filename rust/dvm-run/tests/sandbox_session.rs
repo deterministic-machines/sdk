@@ -74,7 +74,7 @@ impl Fixture {
             .route("/api/sandboxes/1", get(sandbox))
             .route("/api/sandboxes/1/input", post(input))
             .route("/api/sandboxes/1/stop", post(stop))
-            .route("/api/executions/1/output", get(output_after))
+            .route("/api/sandboxes/1/output", get(output_after))
             .with_state(streams.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = Client::new(format!("http://{}", listener.local_addr().unwrap()), "test");
@@ -134,15 +134,14 @@ fn output(bytes: Vec<u8>, more: bool) -> OutputAfter {
 fn api_run(state: RunState) -> Run {
     Run {
         id: RunId::new(1),
-        replay_of: None,
         state,
         runner: Some("runner".into()),
         created_at: Timestamp::from_unix_millis(0),
         started_at: None,
         ended_at: None,
-        log_bytes: None,
-        log_outdated: false,
-        verdict: None,
+        has_timeline: false,
+        inspectable: true,
+        outdated: false,
         version: 1,
     }
 }
@@ -163,7 +162,6 @@ async fn sandbox(State(streams): State<Streams>) -> Json<dvm_run::api::Sandbox> 
         owner: None,
         spec: SandboxSpec::try_from(draft).unwrap(),
         run: api_run(input.state.clone()),
-        replays: Vec::new(),
     })
 }
 async fn input(

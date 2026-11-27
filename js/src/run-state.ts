@@ -1,4 +1,4 @@
-/** Where a sandbox, or a replay, is. */
+/** Where a sandbox is. */
 
 export type RunKind = "queued" | "running" | "paused" | "exited" | "stopped" | "failed";
 

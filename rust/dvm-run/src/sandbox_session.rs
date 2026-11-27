@@ -326,11 +326,7 @@ impl Session {
             loop {
                 let output = calls
                     .client
-                    .output_after(
-                        &format!("/executions/{}/output", calls.id),
-                        offset,
-                        stderr_offset,
-                    )
+                    .output_after(&format!("{}/output", calls.path), offset, stderr_offset)
                     .await?;
                 offset += output.output.stdout.bytes().len() as u64;
                 stderr_offset += output.output.stderr.bytes().len() as u64;

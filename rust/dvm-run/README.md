@@ -14,13 +14,14 @@ prints wherever you like. Where no one is there to approve one, such as CI,
 make a key on [dvm.run's API keys page](https://sandbox.dvm.run/keys) and
 set `DVM_API_KEY`.
 
-A sandbox records its process from start to end. With no command or
-entrypoint it runs the sandbox server and takes commands; the image's own
-command does not run. Commands run as root, in the image's environment and
-working directory, with any environment you supply; a command's `user`
-runs it as another of the image's users. With a command or
-entrypoint it is one run of that program, and the new command and file
-methods fail locally without sending a request.
+A sandbox captures its execution from start to end so you can seek back
+and inspect its state later. With no command or entrypoint it runs the
+sandbox server and takes commands; the image's own command does not run.
+Commands run as root, in the image's environment and working directory,
+with any environment you supply; a command's `user` runs it as another of
+the image's users. With a command or entrypoint it is one run of that
+program, and the new command and file methods fail locally without sending
+a request.
 
 ```rust
 let client = dvm_run::Client::from_env()?;
@@ -36,8 +37,8 @@ sandbox.scope(async |sandbox| {
     server.wait().await?;
     Ok(())
 }).await?;
-let mut replay = client.execution(sandbox.id()).await?.replay().await?;
-assert!(replay.wait().await?.is_same());
+let point = sandbox.seek_end().await?;
+assert_eq!(point.read_file("/tmp/a.txt").await?, b"hi");
 ```
 
 `run(command)` takes argv (an array or vector of strings), or a shell
@@ -89,13 +90,14 @@ does not lock out another writer. Cloning a `Sandbox` shares its session
 and serialized writer.
 
 At scope end, including cancellation, a command sandbox's input is ended
-and its exit is waited for, so its recording replays. `end().await?` does
-this explicitly and returns the sandbox's exit code. EOF kills commands
-still running and makes the server exit 0. A paused sandbox cannot read EOF,
-so scope end stops it instead. A supplied program is also stopped if still
-active. A stopped recording does not replay. Dropping a sandbox without a
-scope leaves it running. Cancelled scopes clean up in a task on the active
-tokio runtime; the runtime must remain alive for that cleanup to finish.
+and its exit is waited for, leaving it ready to inspect. `end().await?`
+does this explicitly and returns the sandbox's exit code. EOF kills
+commands still running and makes the server exit 0. A paused sandbox
+cannot read EOF, so scope end stops it instead. A supplied program is
+also stopped if still active. A stopped sandbox cannot be sought. Dropping
+a sandbox without a scope leaves it running. Cancelled scopes clean up in
+a task on the active tokio runtime; the runtime must remain alive for that
+cleanup to finish.
 
 - Making a sandbox returns once its process started; one already exited
   is fine. `wait()` gives that process's exit code. A stopped sandbox
@@ -106,8 +108,12 @@ tokio runtime; the runtime must remain alive for that cleanup to finish.
   server's answer frames. For a supplied program, dvm merges its
   stdout/stderr in `stdout`; `stderr` is dvm's own diagnostics.
 - `pause`, `resume`, `stop`, `state`, and connecting by id act as before.
-  A replay verdict is `same`, `other_exit` (both codes), or `other_output`
-  (stream and first differing byte). API types are in `dvm_run::api`.
+- `seek(target)` (`seek_end()`, `seek_at_ns(ns)`) returns a `SandboxPoint`
+  with metadata (`ns()`, `thread()`, `process()`, `operations()`,
+  `event()`, `at()`, `stats()`), `step()` (returning `None` at exit),
+  `stat(path)`, `list_dir(path)`, and `read_file(path)`. Idle backend
+  resources are released automatically and restored transparently on the
+  next query. API types are in `dvm_run::api`.
 - The address is `DVM_API_URL`, the key is `DVM_API_KEY`, else the key
   `dvm-run login` saved for that address; both can be given in code.
 

@@ -247,7 +247,7 @@ class SandboxSession:
         try:
             while True:
                 body = await self._connection.bytes(
-                    f"/executions/{self._id}/output",
+                    f"/sandboxes/{self._id}/output",
                     params={"offset": self._output_offset, "stderr_offset": self._stderr_offset},
                 )
                 page = decode_output(body)
