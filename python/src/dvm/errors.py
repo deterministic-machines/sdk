@@ -9,6 +9,10 @@ class DvmError(Exception):
     """Anything the SDK raises."""
 
 
+class NetworkError(DvmError):
+    """dvm.run couldn't be reached, or the connection to it dropped."""
+
+
 class ApiError(DvmError):
     """dvm.run refused a request, with its status and its reason."""
 

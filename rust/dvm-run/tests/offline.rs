@@ -372,3 +372,287 @@ async fn seek_step_and_files_use_stateless_point_routes() {
     assert_eq!(p1.list_dir("/etc").await.unwrap()[0].name, "hosts");
     assert_eq!(p1.read_file("/etc/hosts").await.unwrap(), b"hello");
 }
+
+#[tokio::test(start_paused = true)]
+async fn idempotent_calls_retry_transient_transport_body_and_gateway_errors() {
+    use axum::body::Body;
+    use axum::extract::Query;
+    use axum::response::IntoResponse;
+
+    let gets = Arc::new(AtomicUsize::new(0));
+    let get_count = gets.clone();
+    let seeks = Arc::new(AtomicUsize::new(0));
+    let seek_count = seeks.clone();
+    let inputs = Arc::new(AtomicUsize::new(0));
+    let input_count = inputs.clone();
+
+    let router = Router::new()
+        .route(
+            "/api/sandboxes/1",
+            get(move || {
+                let attempt = get_count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    match attempt {
+                        0 => StatusCode::BAD_GATEWAY.into_response(),
+                        1 => (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [(axum::http::header::RETRY_AFTER, "2")],
+                            "Service Unavailable",
+                        )
+                            .into_response(),
+                        _ => sandbox(RunState::Exited { code: 0 }).into_response(),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/sandboxes/1/points/seek",
+            post(move || {
+                let attempt = seek_count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt == 0 {
+                        StatusCode::GATEWAY_TIMEOUT.into_response()
+                    } else {
+                        Json(sample_stop(7, 10, 0, "openat")).into_response()
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/sandboxes/2",
+            get(|| async {
+                let draft = SandboxDraft {
+                    name: "session".to_owned(),
+                    image: "alpine:3.20".to_owned(),
+                    ..SandboxDraft::default()
+                };
+                Json(Sandbox {
+                    id: SandboxId::new(2),
+                    owner: None,
+                    spec: SandboxSpec::try_from(draft).unwrap(),
+                    run: run(RunState::Exited { code: 0 }),
+                })
+            }),
+        )
+        .route(
+            "/api/sandboxes/2/input",
+            post(
+                move |Query(query): Query<HashMap<String, String>>, body: axum::body::Bytes| {
+                    let attempt = input_count.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if query.get("end").map(String::as_str) == Some("true") {
+                            if attempt == 1 {
+                                return StatusCode::BAD_GATEWAY.into_response();
+                            }
+                            let offset = query["offset"].parse::<u64>().unwrap();
+                            return (
+                                StatusCode::CONFLICT,
+                                Json(dvm_run::api::ApiError {
+                                    message: format!("input already ended at length {offset}"),
+                                }),
+                            )
+                                .into_response();
+                        }
+                        assert_eq!(body.len(), 0);
+                        Json(dvm_run::api::SandboxInputState {
+                            length: 3,
+                            ended: false,
+                        })
+                        .into_response()
+                    }
+                },
+            ),
+        )
+        .route(
+            "/api/sandboxes/2/output",
+            get(|| async {
+                Body::from(dvm_run::api::encode_frame(
+                    &serde_json::json!({ "stdout": 0, "stderr": 0, "more": false, "cut": false }),
+                    &[],
+                ))
+            }),
+        );
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let start = tokio::time::Instant::now();
+    let client = controller(router).await;
+    let sbx = client.connect_sandbox(SandboxId::new(1)).await.unwrap();
+    let _point = sbx.seek_end().await.unwrap();
+
+    let session = client.connect_sandbox(SandboxId::new(2)).await.unwrap();
+    assert_eq!(session.end().await.unwrap(), 0);
+
+    let cut_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cut_addr = cut_listener.local_addr().unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let read_count = reads.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = cut_listener.accept().await {
+            let mut buf = [0u8; 512];
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]);
+            if request.starts_with("GET /api/sandboxes/1 ") {
+                let body = serde_json::to_vec(&sandbox(RunState::Exited { code: 0 }).0).unwrap();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(head.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            } else if request.starts_with("POST /api/sandboxes/1/points/seek ") {
+                let body = serde_json::to_vec(&sample_stop(7, 10, 0, "openat")).unwrap();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(head.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            } else {
+                let attempt = read_count.fetch_add(1, Ordering::SeqCst);
+                let payload: &[u8] = if attempt == 0 { b"he" } else { b"hello" };
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
+                    .await
+                    .unwrap();
+                socket.write_all(payload).await.unwrap();
+            }
+            drop(socket);
+        }
+    });
+    let cut_client = Client::new(format!("http://{cut_addr}"), "dvm_test");
+    let cut_point = cut_client
+        .connect_sandbox(SandboxId::new(1))
+        .await
+        .unwrap()
+        .seek_end()
+        .await
+        .unwrap();
+    assert_eq!(cut_point.read_file("/etc/hosts").await.unwrap(), b"hello");
+
+    assert_eq!(gets.load(Ordering::SeqCst), 3);
+    assert_eq!(seeks.load(Ordering::SeqCst), 2);
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+    assert_eq!(inputs.load(Ordering::SeqCst), 3);
+    assert!(start.elapsed() >= std::time::Duration::from_millis(2_400));
+}
+
+#[tokio::test(start_paused = true)]
+async fn non_idempotent_posts_retry_only_before_execution_and_controller_503_is_not_retried() {
+    use axum::response::IntoResponse;
+    use tokio::io::AsyncReadExt;
+
+    let dropped_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let closed_addr = dropped_listener.local_addr().unwrap();
+    drop(dropped_listener);
+    let closed_start = tokio::time::Instant::now();
+    let closed_client = Client::new(format!("http://{closed_addr}"), "dvm_test");
+    assert!(matches!(
+        closed_client.create_sandbox("alpine").await,
+        Err(Error::Network { .. })
+    ));
+    assert!(closed_start.elapsed() >= std::time::Duration::from_millis(1_850));
+
+    let reset_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let reset_addr = reset_listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_count = accepted.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = reset_listener.accept().await {
+            accepted_count.fetch_add(1, Ordering::SeqCst);
+            let mut buf = [0u8; 256];
+            let _ = socket.read(&mut buf).await;
+            drop(socket);
+        }
+    });
+    let reset_client = Client::new(format!("http://{reset_addr}"), "dvm_test");
+    assert!(matches!(
+        reset_client.create_sandbox("alpine").await,
+        Err(Error::Network { .. })
+    ));
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+
+    let pause_502 = Arc::new(AtomicUsize::new(0));
+    let pause_502_count = pause_502.clone();
+    let pause_429 = Arc::new(AtomicUsize::new(0));
+    let pause_429_count = pause_429.clone();
+    let returning = Arc::new(AtomicUsize::new(0));
+    let returning_count = returning.clone();
+
+    let router = Router::new()
+        .route(
+            "/api/sandboxes/1",
+            get(|| async { sandbox(RunState::Running) }),
+        )
+        .route(
+            "/api/sandboxes/1/pause",
+            post(move || {
+                let attempt = pause_429_count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt == 0 {
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [(axum::http::header::RETRY_AFTER, "99")],
+                            "rate limited",
+                        )
+                            .into_response()
+                    } else {
+                        Json(run(RunState::Paused)).into_response()
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/sandboxes/2",
+            get(|| async {
+                let mut value = sandbox(RunState::Running);
+                value.0.id = SandboxId::new(2);
+                value
+            }),
+        )
+        .route(
+            "/api/sandboxes/2/pause",
+            post(move || {
+                pause_502_count.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::BAD_GATEWAY }
+            }),
+        )
+        .route(
+            "/api/sandboxes/1/points/seek",
+            post(|| async { Json(sample_stop(1, 1, 0, "read")) }),
+        )
+        .route(
+            "/api/sandboxes/1/fs/stat",
+            get(move || {
+                returning_count.fetch_add(1, Ordering::SeqCst);
+                async {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": "returning",
+                            "message": "still seeking"
+                        })),
+                    )
+                }
+            }),
+        );
+
+    let client = controller(router).await;
+    let s1 = client.connect_sandbox(SandboxId::new(1)).await.unwrap();
+    s1.pause().await.unwrap();
+    assert_eq!(pause_429.load(Ordering::SeqCst), 2);
+
+    let s2 = client.connect_sandbox(SandboxId::new(2)).await.unwrap();
+    assert!(matches!(
+        s2.pause().await,
+        Err(Error::Refused { status: 502, .. })
+    ));
+    assert_eq!(pause_502.load(Ordering::SeqCst), 1);
+
+    let point = s1.seek_end().await.unwrap();
+    assert!(matches!(
+        point.stat("/etc/hosts").await,
+        Err(Error::Refused { status: 503, reason }) if reason == "still seeking"
+    ));
+    assert_eq!(returning.load(Ordering::SeqCst), 1);
+}

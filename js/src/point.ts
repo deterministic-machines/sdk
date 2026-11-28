@@ -130,7 +130,7 @@ export class SandboxPoint {
     const stop = await this.#connection.json<ApiDvmStop | null>(
       "POST",
       `/sandboxes/${this.sandboxId}/points/step`,
-      { signal: options.signal, body },
+      { signal: options.signal, body, idempotent: true },
     );
     return stop === null ? null : new SandboxPoint(this.#connection, this.sandboxId, stop);
   }
@@ -192,6 +192,7 @@ export async function seekPoint(
   const stop = await connection.json<ApiDvmStop>("POST", `/sandboxes/${sandboxId}/points/seek`, {
     signal,
     body,
+    idempotent: true,
   });
   return new SandboxPoint(connection, sandboxId, stop);
 }

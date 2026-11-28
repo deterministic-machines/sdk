@@ -172,7 +172,7 @@ class AsyncSandboxPoint:
     ) -> Optional[AsyncSandboxPoint]:
         body = {"thread": self.thread, "event": self.event, **_encode_watches(watch)}
         stop = await self._connection.json(
-            "POST", f"/sandboxes/{self.sandbox_id}/points/step", body=body
+            "POST", f"/sandboxes/{self.sandbox_id}/points/step", body=body, idempotent=True,
         )
         return AsyncSandboxPoint(self._connection, self.sandbox_id, stop) if stop is not None else None
 
@@ -212,7 +212,9 @@ async def seek_point(
     watch: Optional[Sequence[Any]] = None,
 ) -> AsyncSandboxPoint:
     body = {"target": dict(target), **_encode_watches(watch)}
-    stop = await connection.json("POST", f"/sandboxes/{sandbox_id}/points/seek", body=body)
+    stop = await connection.json(
+        "POST", f"/sandboxes/{sandbox_id}/points/seek", body=body, idempotent=True,
+    )
     return AsyncSandboxPoint(connection, sandbox_id, stop)
 
 

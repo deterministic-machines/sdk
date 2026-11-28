@@ -132,7 +132,7 @@ export class Sandbox implements AsyncDisposable {
     const calls = this.#calls;
     let run: ApiRun;
     try {
-      run = await calls.connection.json<ApiRun>("POST", `${calls.path}/stop`, options);
+      run = await calls.connection.json<ApiRun>("POST", `${calls.path}/stop`, { ...options, idempotent: true });
     } catch (refused) {
       if (!(refused instanceof ConflictError)) throw refused;
       run = (await calls.connection.json<ApiSandbox>("GET", calls.path, options)).run;

@@ -128,7 +128,7 @@ class AsyncSandbox:
     async def stop(self) -> None:
         """Stops it. One that already ended stays as it is."""
         try:
-            await self._connection.json("POST", f"{self._path}/stop")
+            await self._connection.json("POST", f"{self._path}/stop", idempotent=True)
         except ConflictError:
             if (await self.state()).is_active:
                 raise
