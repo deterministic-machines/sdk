@@ -1,8 +1,8 @@
 import { encodeFrame } from "../src/frame.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Connection } from "../src/connection.ts";
-import { DvmError, SandboxEndedError, SandboxFailedError } from "../src/errors.ts";
+import { Connection, NetworkError } from "../src/connection.ts";
+import { ApiError, DvmError, SandboxEndedError, SandboxFailedError } from "../src/errors.ts";
 import { Sandbox } from "../src/sandbox.ts";
 import { withEnvironment } from "./environment.ts";
 
@@ -178,4 +178,155 @@ test("seek, step, and files use stateless point routes", async () => {
   await assert.rejects(() => sandbox.seek({ atNs: 1, thread: 1, event: 1 }), DvmError);
   await assert.rejects(() => sandbox.seek({ thread: 1 }), DvmError);
   assert.deepEqual(seeks.map((s) => (s as { target: unknown }).target), [{ kind: "at_ns", ns: 500 }]);
+});
+
+test("idempotent calls retry transient transport, body, and gateway errors", async () => {
+  const delays: number[] = [];
+  const sleep = async (ms: number, signal?: AbortSignal) => {
+    signal?.throwIfAborted();
+    delays.push(ms);
+  };
+  const attempts = { get: 0, body: 0, input: 0, end: 0, seek: 0 };
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (url.pathname === "/api/sandboxes/5" && request.method === "GET") {
+      attempts.get += 1;
+      if (attempts.get === 1) throw new TypeError("fetch failed");
+      if (attempts.get === 2) return new Response("Bad Gateway", { status: 502 });
+      if (attempts.get === 3) {
+        return new Response("Service Unavailable", { status: 503, headers: { "retry-after": "2" } });
+      }
+      return Response.json({ run: { state: { kind: "exited", code: 0 } } });
+    }
+    if (url.pathname === "/api/sandboxes/5/fs/read") {
+      attempts.body += 1;
+      if (attempts.body === 1) {
+        const broken = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2]));
+            controller.error(new Error("socket reset mid-body"));
+          },
+        });
+        return new Response(broken, { status: 200 });
+      }
+      return new Response("hello");
+    }
+    if (url.pathname === "/api/sandboxes/5/input") {
+      if (url.searchParams.get("end") === "true") {
+        attempts.end += 1;
+        if (attempts.end === 1) throw new TypeError("fetch failed");
+        return Response.json(
+          { message: `input already ended at length ${url.searchParams.get("offset")}` },
+          { status: 409 },
+        );
+      }
+      attempts.input += 1;
+      assert.equal(url.searchParams.get("offset"), "0");
+      if (attempts.input === 1) throw new TypeError("fetch failed");
+      const bytes = new Uint8Array(await request.arrayBuffer());
+      return Response.json({ length: bytes.length, ended: false });
+    }
+    if (url.pathname === "/api/sandboxes/5/points/seek") {
+      attempts.seek += 1;
+      if (attempts.seek === 1) return new Response("Gateway Timeout", { status: 504 });
+      return Response.json({
+        thread: 1, process: 1, operations: 1, event: 1, recording_ns: 0,
+        at: { syscall: { number: 0, name: "read", args: [] } }, stats: {},
+      });
+    }
+    throw new Error(`unexpected ${url.pathname}`);
+  };
+
+  const connection = new Connection("http://dvm.test", "test", fetcher, sleep);
+  const sandbox = new Sandbox(connection, { id: 5, spec: { name: "test" } }, 0);
+  assert.equal(await sandbox.wait(), 0);
+  const state = await connection.input<{ length: number; ended: boolean }>(
+    "/sandboxes/5/input",
+    new Uint8Array([1, 2, 3]),
+    { query: { offset: 0, end: false } },
+  );
+  assert.deepEqual(state, { length: 3, ended: false });
+  const ended = await connection.input<{ length: number; ended: boolean }>(
+    "/sandboxes/5/input",
+    new Uint8Array(),
+    { query: { offset: 3, end: true } },
+  );
+  assert.deepEqual(ended, { length: 3, ended: true });
+  const point = await sandbox.seek();
+  assert.deepEqual(await point.readFile("/etc/hosts"), new TextEncoder().encode("hello"));
+  assert.deepEqual(attempts, { get: 4, body: 2, input: 2, end: 2, seek: 2 });
+  assert.deepEqual(delays, [100, 250, 2000, 100, 100, 100, 100]);
+});
+
+test("non-idempotent posts only retry connect errors and caller aborts never retry", async () => {
+  const delays: number[] = [];
+  const sleep = async (ms: number, signal?: AbortSignal) => {
+    signal?.throwIfAborted();
+    delays.push(ms);
+  };
+  const calls = { connect: 0, reset: 0, badGateway: 0, returning: 0, exhaust: 0, aborted: 0 };
+
+  const fetcher: typeof fetch = async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (url.pathname === "/api/sandboxes/1/pause") {
+      calls.connect += 1;
+      if (calls.connect === 1) {
+        const cause = Object.assign(new Error("handshake reset"), { code: "ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE" });
+        throw new TypeError("fetch failed", { cause });
+      }
+      if (calls.connect === 2) {
+        return new Response("rate limited", { status: 429, headers: { "retry-after": "99" } });
+      }
+      return Response.json({ state: { kind: "paused" } });
+    }
+    if (url.pathname === "/api/sandboxes/2/pause") {
+      calls.reset += 1;
+      const cause = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+      throw new TypeError("fetch failed", { cause });
+    }
+    if (url.pathname === "/api/sandboxes/3/pause") {
+      calls.badGateway += 1;
+      return new Response("Bad Gateway", { status: 502 });
+    }
+    if (url.pathname === "/api/sandboxes/4/fs/stat") {
+      calls.returning += 1;
+      return Response.json({ error: "returning", message: "still seeking" }, { status: 503 });
+    }
+    if (url.pathname === "/api/sandboxes/5") {
+      calls.exhaust += 1;
+      throw new TypeError("fetch failed");
+    }
+    if (url.pathname === "/api/sandboxes/6") {
+      calls.aborted += 1;
+      init?.signal?.throwIfAborted();
+      throw new TypeError("fetch failed");
+    }
+    throw new Error(`unexpected ${url.pathname}`);
+  };
+
+  const connection = new Connection("http://dvm.test", "test", fetcher, sleep);
+  await new Sandbox(connection, { id: 1, spec: { name: "a" } }).pause();
+  await assert.rejects(() => new Sandbox(connection, { id: 2, spec: { name: "b" } }).pause(), NetworkError);
+  await assert.rejects(
+    () => new Sandbox(connection, { id: 3, spec: { name: "c" } }).pause(),
+    (err: unknown) => err instanceof ApiError && err.status === 502,
+  );
+  await assert.rejects(
+    () => connection.json("GET", "/sandboxes/4/fs/stat"),
+    (err: unknown) => err instanceof ApiError && err.status === 503 && /still seeking/.test(err.message),
+  );
+  await assert.rejects(() => new Sandbox(connection, { id: 5, spec: { name: "e" } }).state(), NetworkError);
+
+  const controller = new AbortController();
+  controller.abort(new Error("caller cancelled"));
+  await assert.rejects(
+    () => new Sandbox(connection, { id: 6, spec: { name: "f" } }).state({ signal: controller.signal }),
+    /caller cancelled/,
+  );
+
+  assert.deepEqual(calls, { connect: 3, reset: 1, badGateway: 1, returning: 1, exhaust: 5, aborted: 0 });
+  assert.deepEqual(delays, [100, 5000, 100, 250, 500, 1000]);
 });

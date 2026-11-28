@@ -229,7 +229,7 @@ impl Session {
             let mut writer = self.writer.lock().await;
             if !writer.ended {
                 self.ready(&mut writer, true).await?;
-                self.append(&mut writer, Vec::new(), true).await?;
+                self.append(&mut writer, &[], true).await?;
                 writer.ended = true;
             }
         }
@@ -271,7 +271,7 @@ impl Session {
             });
         }
         if writer.offset.is_none() {
-            self.append(writer, Vec::new(), false).await?;
+            self.append(writer, &[], false).await?;
         }
         let mut reader = self.reader.lock().unwrap();
         if reader.is_none() {
@@ -283,7 +283,7 @@ impl Session {
         Ok(())
     }
 
-    async fn append(&self, writer: &mut InputWriter, bytes: Vec<u8>, end: bool) -> Result<()> {
+    async fn append(&self, writer: &mut InputWriter, bytes: &[u8], end: bool) -> Result<()> {
         let input = SandboxInput {
             offset: writer.offset.unwrap_or(0),
             end,
@@ -314,7 +314,7 @@ impl Session {
             });
         }
         for chunk in bytes.chunks(SandboxInput::MAX_CHUNK_BYTES) {
-            self.append(writer, chunk.to_vec(), false).await?;
+            self.append(writer, chunk, false).await?;
         }
         Ok(())
     }

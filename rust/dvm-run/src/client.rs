@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dvm_api::{ApiError, SandboxId};
-use reqwest::{Method, RequestBuilder, Response};
+use reqwest::header::HeaderMap;
+use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -18,6 +19,13 @@ pub const DEFAULT_API_URL: &str = "https://sandbox.dvm.run";
 /// The controller answers a `?newer_than=` read within 30 s, and keeps a
 /// quiet event stream alive with comments more often than this.
 const QUIET_LIMIT: Duration = Duration::from_secs(60);
+const RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(100),
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_millis(1000),
+];
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(5);
 
 /// dvm.run's API, at an address, as the user whose key it bears. Cheap to
 /// clone: clones share their connections.
@@ -95,16 +103,34 @@ impl Client {
         query: Query<'_>,
         body: Option<&impl Serialize>,
     ) -> Result<T> {
-        let mut request = self.request(method, path, query).timeout(QUIET_LIMIT);
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let bytes = self
-            .send(path, request)
-            .await?
-            .bytes()
-            .await
-            .map_err(|error| Error::network(format!("reading {path}"), error))?;
+        let idempotent = matches!(method, Method::GET | Method::PUT | Method::DELETE);
+        self.send_json(method, path, query, body, idempotent).await
+    }
+
+    pub(crate) async fn json_idempotent<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        query: Query<'_>,
+        body: Option<&impl Serialize>,
+    ) -> Result<T> {
+        self.send_json(method, path, query, body, true).await
+    }
+
+    async fn send_json<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        query: Query<'_>,
+        body: Option<&impl Serialize>,
+        idempotent: bool,
+    ) -> Result<T> {
+        let encoded = body
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|error| Error::Unexpected(format!("{path}'s body: {error}")))?;
+        let payload = encoded.as_deref().map(|bytes| ("application/json", bytes));
+        let bytes = self.send(method, path, query, payload, idempotent).await?;
         let slice = if bytes.is_empty() {
             &b"null"[..]
         } else {
@@ -115,34 +141,43 @@ impl Client {
     }
 
     pub(crate) async fn get_bytes(&self, path: &str, query: Query<'_>) -> Result<Vec<u8>> {
-        let request = self.request(Method::GET, path, query).timeout(QUIET_LIMIT);
-        let bytes = self
-            .send(path, request)
-            .await?
-            .bytes()
-            .await
-            .map_err(|error| Error::network(format!("reading {path}"), error))?;
-        Ok(bytes.to_vec())
+        self.send(Method::GET, path, query, None, true).await
     }
 
     pub(crate) async fn input(
         &self,
         path: &str,
         input: &dvm_api::SandboxInput,
-        body: Vec<u8>,
+        body: &[u8],
     ) -> Result<dvm_api::SandboxInputState> {
-        let request = self
-            .request(Method::POST, path, &[])
-            .query(input)
-            .timeout(QUIET_LIMIT)
-            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(body);
-        let bytes = self
-            .send(path, request)
-            .await?
-            .bytes()
-            .await
-            .map_err(|error| Error::network(format!("reading {path}"), error))?;
+        let query = [
+            ("offset", input.offset.to_string()),
+            ("end", input.end.to_string()),
+        ];
+        let (status, bytes, attempt) = self
+            .exchange(
+                Method::POST,
+                path,
+                &query,
+                Some(("application/octet-stream", body)),
+                true,
+            )
+            .await?;
+        if !status.is_success() {
+            let reason = refusal_reason(status, &bytes);
+            if status == StatusCode::CONFLICT
+                && attempt > 0
+                && input.end
+                && body.is_empty()
+                && reason == format!("input already ended at length {}", input.offset)
+            {
+                return Ok(dvm_api::SandboxInputState {
+                    length: input.offset,
+                    ended: true,
+                });
+            }
+            return Err(Error::refusal(status.as_u16(), reason));
+        }
         serde_json::from_slice(&bytes)
             .map_err(|error| Error::Unexpected(format!("{path}'s answer: {error}")))
     }
@@ -181,13 +216,7 @@ impl Client {
     }
 
     async fn output_page(&self, path: &str, query: Query<'_>) -> Result<dvm_api::OutputAfter> {
-        let request = self.request(Method::GET, path, query).timeout(QUIET_LIMIT);
-        let bytes = self
-            .send(path, request)
-            .await?
-            .bytes()
-            .await
-            .map_err(|error| Error::network(format!("reading {path}"), error))?;
+        let bytes = self.send(Method::GET, path, query, None, true).await?;
         dvm_api::OutputAfter::from_frame(&bytes)
             .map_err(|error| Error::Unexpected(format!("{path}'s answer: {error}")))
     }
@@ -208,24 +237,134 @@ impl Client {
         }
     }
 
-    /// The response, refused unless it's a success.
-    async fn send(&self, path: &str, request: RequestBuilder) -> Result<Response> {
-        let response = request.send().await.map_err(|error| {
-            Error::network(format!("couldn't reach {}{path}", self.inner.api), error)
-        })?;
-        let status = response.status();
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        query: Query<'_>,
+        body: Option<(&'static str, &[u8])>,
+        idempotent: bool,
+    ) -> Result<Vec<u8>> {
+        let (status, bytes, _) = self.exchange(method, path, query, body, idempotent).await?;
         if status.is_success() {
-            return Ok(response);
+            return Ok(bytes);
         }
-        let text = response.text().await.unwrap_or_default();
-        let reason = if let Ok(refusal) = serde_json::from_str::<ApiError>(&text) {
-            refusal.message
-        } else if text.is_empty() {
-            status.canonical_reason().unwrap_or("").to_owned()
-        } else {
-            text
-        };
-        Err(Error::refusal(status.as_u16(), reason))
+        Err(Error::refusal(
+            status.as_u16(),
+            refusal_reason(status, &bytes),
+        ))
+    }
+
+    async fn exchange(
+        &self,
+        method: Method,
+        path: &str,
+        query: Query<'_>,
+        body: Option<(&'static str, &[u8])>,
+        idempotent: bool,
+    ) -> Result<(StatusCode, Vec<u8>, usize)> {
+        for (attempt, delay) in RETRY_DELAYS
+            .into_iter()
+            .map(Some)
+            .chain(std::iter::once(None))
+            .enumerate()
+        {
+            let mut request = self
+                .request(method.clone(), path, query)
+                .timeout(QUIET_LIMIT);
+            if let Some((content_type, payload)) = body {
+                request = request
+                    .header(reqwest::header::CONTENT_TYPE, content_type)
+                    .body(payload.to_vec());
+            }
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(delay) = delay
+                        && retryable_error(&error, idempotent, true)
+                    {
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(Error::network(
+                        format!("couldn't reach {}{path}", self.inner.api),
+                        error,
+                    ));
+                }
+            };
+            let status = response.status();
+            let retry_after = retry_after_delay(response.headers());
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    if let Some(delay) = delay
+                        && retryable_error(&error, idempotent, false)
+                    {
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(Error::network(format!("reading {path}"), error));
+                }
+            };
+            if !status.is_success()
+                && let Some(delay) = delay
+                && retryable_status(status.as_u16(), &bytes, idempotent)
+            {
+                let wait = retry_after.map_or(delay, |hint| hint.max(delay).min(MAX_RETRY_AFTER));
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            return Ok((status, bytes.to_vec(), attempt));
+        }
+        unreachable!()
+    }
+}
+
+fn retryable_error(error: &reqwest::Error, idempotent: bool, sending: bool) -> bool {
+    !error.is_builder() && (idempotent || (sending && error.is_connect()))
+}
+
+fn retryable_status(status: u16, bytes: &[u8], idempotent: bool) -> bool {
+    if matches!(status, 408 | 429) {
+        return true;
+    }
+    if !idempotent {
+        return false;
+    }
+    matches!(status, 502 | 504) || (status == 503 && !is_controller_refusal(bytes))
+}
+
+fn is_controller_refusal(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|body| {
+            body.get("error")
+                .and_then(serde_json::Value::as_str)
+                .map(|_| ())
+        })
+        .is_some()
+}
+
+fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+}
+
+fn refusal_reason(status: StatusCode, bytes: &[u8]) -> String {
+    if let Ok(refusal) = serde_json::from_slice::<ApiError>(bytes) {
+        return refusal.message;
+    }
+    let text = String::from_utf8_lossy(bytes);
+    if text.is_empty() {
+        status.canonical_reason().unwrap_or("").to_owned()
+    } else {
+        text.into_owned()
     }
 }
 

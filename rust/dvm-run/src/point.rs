@@ -66,7 +66,7 @@ impl SeekBuilder {
         };
         let stop: DvmStop = self
             .client
-            .json(
+            .json_idempotent(
                 Method::POST,
                 &format!("/sandboxes/{}/points/seek", self.sandbox),
                 &[],
@@ -106,7 +106,7 @@ impl StepBuilder {
         let stop: Option<DvmStop> = self
             .point
             .client
-            .json(
+            .json_idempotent(
                 Method::POST,
                 &format!("/sandboxes/{}/points/step", self.point.sandbox),
                 &[],

@@ -189,7 +189,7 @@ impl Sandbox {
         let stop = format!("{}/stop", calls.path);
         match calls
             .client
-            .json::<Run>(Method::POST, &stop, &[], None::<&()>)
+            .json_idempotent::<Run>(Method::POST, &stop, &[], None::<&()>)
             .await
         {
             Ok(_) => {}
@@ -383,7 +383,7 @@ impl Drop for StopOnDrop {
             let stop = format!("{}/stop", calls.path);
             let _ = calls
                 .client
-                .json::<Run>(Method::POST, &stop, &[], None::<&()>)
+                .json_idempotent::<Run>(Method::POST, &stop, &[], None::<&()>)
                 .await;
         });
     }
